@@ -10,15 +10,15 @@
 # rather than as a mystery.
 
 # ---- serving ----
-fastapi==0.141.1
-uvicorn==0.52.4
+fastapi==0.142.2
+uvicorn==0.54.0
 pydantic==2.13.5
 
 # ---- the model ----
 # scikit-learn brings joblib (artifact persistence) and threadpoolctl transitively.
-scikit-learn==1.8.0
-numpy==2.4.3
-scipy==1.17.1
+scikit-learn==1.9.1
+numpy==2.5.3
+scipy==1.18.1
 
 # ---- tests ----
 # httpx backs Starlette's TestClient.
