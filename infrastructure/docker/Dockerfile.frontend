@@ -54,7 +54,7 @@ RUN npm run build
 # application is a directory of assets, and shipping a runtime that can execute
 # arbitrary JavaScript to serve them is attack surface for nothing.
 # -----------------------------------------------------------------------------
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:1.31-alpine AS runtime
 
 LABEL org.opencontainers.image.title="AegisPay admin dashboard" \
       org.opencontainers.image.description="Operations and fraud console for the AegisPay platform" \
