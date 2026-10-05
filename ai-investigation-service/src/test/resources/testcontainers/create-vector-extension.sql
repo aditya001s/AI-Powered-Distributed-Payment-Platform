@@ -1,0 +1,11 @@
+-- Creates the pgvector extension in the test database.
+--
+-- CREATE EXTENSION needs superuser, which the application role deliberately does not
+-- have. In a real deployment this is done by
+-- infrastructure/docker/postgres/00-init-service-databases.sh; here Testcontainers runs this
+-- script as the container's own superuser before Flyway connects.
+--
+-- V2__knowledge_base.sql asserts the extension is present and raises a readable error
+-- if it is not, so a missing extension fails with an explanation rather than
+-- "type vector does not exist".
+CREATE EXTENSION IF NOT EXISTS vector;

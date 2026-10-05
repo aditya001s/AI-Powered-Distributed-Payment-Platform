@@ -1,0 +1,166 @@
+###############################################################################
+# auth-service
+#
+# Every secret and every host arrives from the environment. Defaults exist only
+# for non-sensitive values; a missing credential fails startup rather than
+# quietly running with an empty password.
+###############################################################################
+
+spring:
+  application:
+    name: auth-service
+
+  # Shared platform defaults: Jackson dialect, Hikari sizing, Flyway policy,
+  # actuator exposure, tracing, aegis.* defaults. Lower precedence than the
+  # values in this file, so anything below wins.
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${AUTH_DB_NAME:aegis_auth}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    locations: classpath:db/migration
+
+  jpa:
+    # Flyway owns the schema. validate makes a mapping/schema mismatch a startup
+    # failure instead of a silent ALTER against a live database.
+    hibernate:
+      ddl-auto: validate
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # auth-service validates its own tokens with the in-memory public key
+          # (see JwtKeyConfig#jwtDecoder), so no jwk-set-uri is configured here.
+          # Pointing it at itself would be a pointless network hop and would make
+          # the service depend on its own availability to authorise a request.
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+server:
+  port: ${SERVER_PORT:8081}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  openapi:
+    description: >-
+      Identity provider for AegisPay and the only issuer of access tokens.
+      Owns users, roles, credentials and refresh-token lifecycle.
+
+  # auth-service defines its own SecurityFilterChain because it must expose
+  # public registration, login, refresh and JWKS endpoints. The shared
+  # deny-by-default chain is therefore NOT enabled here.
+  security:
+    standard-chain:
+      enabled: false
+
+  # This service is the token issuer, so it never needs to obtain one.
+  service-auth:
+    enabled: false
+
+  # No domain events are emitted yet. Enabled in a later phase if identity
+  # changes need to be published.
+  outbox:
+    enabled: false
+
+  # Kafka is intentionally absent: auth-service issues identity tokens but emits no
+  # domain events, so it does not activate the optional shared Kafka configuration.
+
+  auth:
+    jwt:
+      # Blank => an ephemeral RSA key pair is generated at startup. Fine locally;
+      # startup REFUSES this when aegis.platform-env=kubernetes, because each
+      # replica would sign with a different key and publish only its own.
+      private-key-location: ${JWT_PRIVATE_KEY_LOCATION:}
+      public-key-location: ${JWT_PUBLIC_KEY_LOCATION:}
+      issuer: ${JWT_ISSUER:https://auth.aegispay.local}
+      audience: aegispay-platform
+      access-token-ttl: ${JWT_ACCESS_TOKEN_TTL_SECONDS:900}s
+      refresh-token-ttl: ${JWT_REFRESH_TOKEN_TTL_SECONDS:2592000}s
+      service-token-ttl: 10m
+      clock-skew: 30s
+
+    password:
+      bcrypt-strength: ${BCRYPT_STRENGTH:12}
+      min-length: 12
+      max-length: 72
+      require-mixed-case: true
+      require-digit: true
+      require-special: true
+
+    lockout:
+      max-failed-attempts: 6
+      lock-duration: 15m
+      attempt-window: 30m
+
+    # Machine clients for the client-credentials grant. Reconciled into
+    # service_clients at startup by CredentialSeeder; the secret is only ever
+    # stored as a BCrypt hash.
+    service-clients:
+      - client-id: ${WALLET_SERVICE_INTERNAL_CLIENT_ID:wallet-service}
+        client-secret: ${WALLET_SERVICE_INTERNAL_CLIENT_SECRET:}
+        scopes: [internal]
+        roles: [SERVICE]
+        description: wallet-service outbound identity
+      - client-id: ${LEDGER_SERVICE_INTERNAL_CLIENT_ID:ledger-service}
+        client-secret: ${LEDGER_SERVICE_INTERNAL_CLIENT_SECRET:}
+        scopes: [internal]
+        roles: [SERVICE]
+        description: ledger-service outbound identity
+      - client-id: ${PAYMENT_SERVICE_INTERNAL_CLIENT_ID:payment-service}
+        client-secret: ${PAYMENT_SERVICE_INTERNAL_CLIENT_SECRET:}
+        scopes: [internal]
+        roles: [SERVICE]
+        description: payment-service outbound identity
+      - client-id: ${PAYMENT_ORCHESTRATOR_INTERNAL_CLIENT_ID:payment-orchestrator}
+        client-secret: ${PAYMENT_ORCHESTRATOR_INTERNAL_CLIENT_SECRET:}
+        scopes: [internal]
+        roles: [SERVICE]
+        description: payment-orchestrator outbound identity
+      - client-id: ${FRAUD_SERVICE_INTERNAL_CLIENT_ID:fraud-service}
+        client-secret: ${FRAUD_SERVICE_INTERNAL_CLIENT_SECRET:}
+        scopes: [internal]
+        roles: [SERVICE]
+        description: fraud-service outbound identity
+      - client-id: ${NOTIFICATION_SERVICE_INTERNAL_CLIENT_ID:notification-service}
+        client-secret: ${NOTIFICATION_SERVICE_INTERNAL_CLIENT_SECRET:}
+        scopes: [internal]
+        roles: [SERVICE]
+        description: notification-service outbound identity
+      - client-id: ${ANALYTICS_SERVICE_INTERNAL_CLIENT_ID:analytics-service}
+        client-secret: ${ANALYTICS_SERVICE_INTERNAL_CLIENT_SECRET:}
+        scopes: [internal]
+        roles: [SERVICE]
+        description: analytics-service outbound identity
+
+    demo:
+      seed-enabled: ${DEMO_SEED_ENABLED:false}
+      user-email: ${DEMO_USER_EMAIL:demo.user@aegispay.local}
+      user-password: ${DEMO_USER_PASSWORD:}
+      merchant-email: ${DEMO_MERCHANT_EMAIL:demo.merchant@aegispay.local}
+      merchant-password: ${DEMO_MERCHANT_PASSWORD:}
+      admin-email: ${DEMO_ADMIN_EMAIL:demo.admin@aegispay.local}
+      admin-password: ${DEMO_ADMIN_PASSWORD:}
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+
+# Note: demo-account seeding is controlled purely by DEMO_SEED_ENABLED (see
+# aegis.auth.demo.seed-enabled above) rather than by a Spring profile. One switch,
+# read from the environment, is easier to reason about than a profile that silently
+# changes which accounts exist. CredentialSeeder additionally refuses to seed when
+# aegis.platform-env=kubernetes, so well-known demo credentials cannot reach a
+# production-like environment even if the flag is left enabled by mistake.

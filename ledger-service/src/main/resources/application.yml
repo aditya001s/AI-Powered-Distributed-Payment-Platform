@@ -1,0 +1,88 @@
+###############################################################################
+# ledger-service
+#
+# Immutable double-entry accounting journal. The platform's book of record.
+# Every posting is balanced (total debits == total credits) and append-only:
+# a mistake is corrected by a new, opposite posting rather than by editing
+# history.
+#
+# Hosts and secrets come from the environment. Shared platform defaults are
+# imported from platform-common's aegis-defaults.yml, which this file overrides.
+###############################################################################
+
+spring:
+  application:
+    name: ledger-service
+
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${LEDGER_DB_NAME:aegis_ledger}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    locations: classpath:db/migration
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. validate turns a mapping/schema mismatch into a
+      # startup failure instead of a silent ALTER against a live database.
+      ddl-auto: validate
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys are fetched from the auth service. This service therefore
+          # holds no signing material and cannot mint a token, so compromising it
+          # does not yield the ability to forge identities.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+server:
+  port: ${SERVER_PORT:8083}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  openapi:
+    description: >-
+      The platform's book of record. Every posting is balanced (total debits == total credits) and append-only: a mistake is corrected by a new, opposite posting rather than by editing history.
+
+  # Use the shared deny-by-default resource-server chain from platform-common.
+  security:
+    standard-chain:
+      enabled: true
+
+  # Credentials for outbound service-to-service calls (OAuth2 client credentials).
+  service-auth:
+    enabled: true
+    token-uri: ${AUTH_SERVICE_URL:http://localhost:8081}/api/auth/token
+    client-id: ${INTERNAL_CLIENT_ID:aegis-internal}
+    client-secret: ${INTERNAL_CLIENT_SECRET:}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # A distinct group per service: each one needs its own copy of every event.
+    # Sharing a group id would make services steal each other's partitions.
+    consumer-group-id: ledger-service
+
+  outbox:
+    # This service emits domain events, so it records them to the outbox inside
+    # the business transaction and drains them to Kafka asynchronously.
+    enabled: true
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+

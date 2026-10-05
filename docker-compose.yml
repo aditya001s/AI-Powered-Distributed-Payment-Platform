@@ -1,0 +1,645 @@
+# =============================================================================
+# AegisPay - AI-Powered Payment Orchestration & Fraud Intelligence Platform
+#
+#   cp .env.example .env      # then replace every CHANGE_ME value
+#   docker compose up -d --build
+#   docker compose ps         # wait for all services to report (healthy)
+#
+# Scope note: this is the local application/demo stack for the completed
+# Phase 1-10 project: infrastructure, ten JVM services, Python ML scoring, and
+# the React operations console. Phase 10's Prometheus/Grafana/Tempo/OpenTelemetry
+# topology is deployed by the Helm chart rather than duplicated in Compose.
+#
+# The `version:` key is intentionally omitted; it is obsolete in Compose v2 and
+# emits a warning.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Shared building blocks.
+#
+# YAML anchors rather than ten copies of the same block. Ten copies drift, and a
+# JVM setting or dependency condition fixed in one and missed in the others is
+# invisible in review.
+# -----------------------------------------------------------------------------
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  env_file: [.env]
+  networks: [aegis]
+  # Bounded log files. Without this, container logs grow until the host disk is
+  # full, which takes down every container on the box.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-java-service: &java-service
+  <<: *service-defaults
+  build:
+    context: .
+    dockerfile: infrastructure/docker/Dockerfile.service
+  # Every JVM service needs the database, the cache and the broker to be actually
+  # ready, not merely started. `service_started` would let a service race ahead
+  # and crash-loop on a connection refusal.
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+  deploy:
+    resources:
+      limits:
+        # The JVM reads the container limit (MaxRAMPercentage in the Dockerfile),
+        # so this value directly determines heap size.
+        memory: 768M
+      reservations:
+        memory: 256M
+
+x-java-env: &java-env
+  PLATFORM_ENV: docker
+  SPRING_PROFILES_ACTIVE: docker
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  AUTH_JWKS_URI: http://auth-service:8081/.well-known/jwks.json
+  AUTH_SERVICE_URL: http://auth-service:8081
+  # Browser-facing only: this becomes the OpenAPI `servers` URL that Swagger UI
+  # posts to. It must be 127.0.0.1 rather than localhost because every port below
+  # is published on 127.0.0.1 only, while a browser resolving `localhost` can pick
+  # IPv6 ::1 first and fail the request outright with no HTTP response. Not used
+  # for service-to-service calls, which go over the Compose network by name.
+  GATEWAY_URL: http://127.0.0.1:8080
+
+services:
+
+  # ===========================================================================
+  # Infrastructure
+  # ===========================================================================
+
+  postgres:
+    <<: *service-defaults
+    # pgvector's image, not plain postgres: ai-investigation-service needs the
+    # `vector` extension for RAG retrieval, and CREATE EXTENSION cannot install a
+    # binary that is not present in the image.
+    image: pgvector/pgvector:pg17
+    container_name: aegis-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aegis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-aegis_platform}
+      # Deterministic collation, so index ordering does not vary with host locale.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # Bound to loopback only. "5432:5432" would publish the database on every
+      # host interface, which on a cloud VM means exposing it to the internet.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs once on first start, creating one database per service.
+      - ./infrastructure/docker/postgres:/docker-entrypoint-initdb.d:ro
+    command:
+      # max_connections sized for ~12 pooled connections per service across ten
+      # services, plus headroom for migrations and psql.
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      # Log statements slower than 500ms so a slow query is visible without
+      # logging every statement.
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - log_lock_waits=on
+    healthcheck:
+      # -d is required: without it pg_isready checks the default database and can
+      # report ready before the init script has finished creating the others.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aegis} -d ${POSTGRES_DB:-aegis_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  redis:
+    <<: *service-defaults
+    image: redis:7.4-alpine
+    container_name: aegis-redis
+    # requirepass via command, and the password comes from the environment.
+    # An unauthenticated Redis reachable on a network is one of the most commonly
+    # exploited misconfigurations there is.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
+      - --appendonly
+      - "yes"
+      # Locks and idempotency records are recoverable state, but losing them all
+      # at once would let duplicate requests through, so AOF is enabled.
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 256mb
+      # Locks and idempotency keys carry their own TTLs, so evicting the
+      # least-recently-used key under pressure is safe and preferable to refusing
+      # writes.
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+
+  kafka:
+    <<: *service-defaults
+    # KRaft mode: no ZooKeeper. One fewer moving part, and the direction Kafka
+    # itself has taken.
+    image: apache/kafka:3.9.1
+    container_name: aegis-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      # Single node acting as both broker and controller. Correct for local
+      # development; production uses dedicated controllers (see the K8s manifests).
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
+      # Two advertised listeners on purpose: containers reach the broker as
+      # `kafka:9092`, while a tool on the host reaches it as `localhost:29092`.
+      # A single listener cannot satisfy both, and getting this wrong produces the
+      # classic "connects, then times out on produce" failure, because the client
+      # is redirected to a hostname it cannot resolve.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Single broker, so internal topics cannot be replicated further than 1.
+      # Leaving these at their default of 3 makes the broker fail to create
+      # __consumer_offsets and every consumer hangs.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are provisioned explicitly by the application (KafkaConfig) with
+      # chosen partition counts and retention. Auto-create would silently produce
+      # single-partition topics with default retention instead.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 720
+      CLUSTER_ID: aegispay-local-cluster-0
+    ports:
+      - "127.0.0.1:29092:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # Listing topics proves the broker is accepting API requests. A TCP port
+      # check would pass while the broker was still recovering its log.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+
+  # ===========================================================================
+  # Edge
+  # ===========================================================================
+
+  api-gateway:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: api-gateway
+        SERVICE_PORT: 8080
+    container_name: aegis-api-gateway
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8080
+      WALLET_SERVICE_URL: http://wallet-service:8082
+      LEDGER_SERVICE_URL: http://ledger-service:8083
+      PAYMENT_SERVICE_URL: http://payment-service:8084
+      ORCHESTRATOR_SERVICE_URL: http://payment-orchestrator:8085
+      FRAUD_SERVICE_URL: http://fraud-service:8086
+      AI_SERVICE_URL: http://ai-investigation-service:8087
+      NOTIFICATION_SERVICE_URL: http://notification-service:8088
+      ANALYTICS_SERVICE_URL: http://analytics-service:8089
+    ports:
+      # Loopback-only for local development and panel demonstrations. Kubernetes
+      # Ingress is the explicit network-facing deployment path.
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        # The gateway fetches JWKS from auth-service to validate tokens, so
+        # starting before it is ready would reject every request until the first
+        # successful fetch.
+        condition: service_healthy
+
+  # ===========================================================================
+  # Core domain services
+  #
+  # Ports are bound to 127.0.0.1 for local debugging and direct Swagger access.
+  # In a real deployment these publications would be removed entirely.
+  # ===========================================================================
+
+  auth-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: auth-service
+        SERVICE_PORT: 8081
+    container_name: aegis-auth-service
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8081
+      POSTGRES_USER: aegis_auth_user
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?AUTH_DB_PASSWORD must be set in .env}
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      # auth-service uses neither Kafka nor Redis, so it waits only on Postgres.
+      # Overriding the shared anchor keeps startup fast and makes the real
+      # dependency set explicit.
+      postgres:
+        condition: service_healthy
+
+  wallet-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: wallet-service
+        SERVICE_PORT: 8082
+    container_name: aegis-wallet-service
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8082
+      POSTGRES_USER: aegis_wallet_user
+      POSTGRES_PASSWORD: ${WALLET_DB_PASSWORD:?WALLET_DB_PASSWORD must be set in .env}
+      INTERNAL_CLIENT_ID: ${WALLET_SERVICE_INTERNAL_CLIENT_ID:-wallet-service}
+      INTERNAL_CLIENT_SECRET: ${WALLET_SERVICE_INTERNAL_CLIENT_SECRET:?WALLET_SERVICE_INTERNAL_CLIENT_SECRET must be set in .env}
+    ports:
+      - "127.0.0.1:8082:8082"
+
+  ledger-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: ledger-service
+        SERVICE_PORT: 8083
+    container_name: aegis-ledger-service
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8083
+      POSTGRES_USER: aegis_ledger_user
+      POSTGRES_PASSWORD: ${LEDGER_DB_PASSWORD:?LEDGER_DB_PASSWORD must be set in .env}
+      INTERNAL_CLIENT_ID: ${LEDGER_SERVICE_INTERNAL_CLIENT_ID:-ledger-service}
+      INTERNAL_CLIENT_SECRET: ${LEDGER_SERVICE_INTERNAL_CLIENT_SECRET:?LEDGER_SERVICE_INTERNAL_CLIENT_SECRET must be set in .env}
+    ports:
+      - "127.0.0.1:8083:8083"
+
+  payment-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: payment-service
+        SERVICE_PORT: 8084
+    container_name: aegis-payment-service
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8084
+      POSTGRES_USER: aegis_payment_user
+      POSTGRES_PASSWORD: ${PAYMENT_DB_PASSWORD:?PAYMENT_DB_PASSWORD must be set in .env}
+      INTERNAL_CLIENT_ID: ${PAYMENT_SERVICE_INTERNAL_CLIENT_ID:-payment-service}
+      INTERNAL_CLIENT_SECRET: ${PAYMENT_SERVICE_INTERNAL_CLIENT_SECRET:?PAYMENT_SERVICE_INTERNAL_CLIENT_SECRET must be set in .env}
+      # The only synchronous dependency. Since Phase 5 payment-service reaches
+      # payment-orchestrator through Kafka and never over HTTP, so it holds no URL
+      # for it - a configured URL nothing calls invites someone to call it.
+      WALLET_SERVICE_URL: http://wallet-service:8082
+    ports:
+      - "127.0.0.1:8084:8084"
+
+  payment-orchestrator:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: payment-orchestrator
+        SERVICE_PORT: 8085
+    container_name: aegis-payment-orchestrator
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8085
+      POSTGRES_USER: aegis_orchestrator_user
+      POSTGRES_PASSWORD: ${ORCHESTRATOR_DB_PASSWORD:?ORCHESTRATOR_DB_PASSWORD must be set in .env}
+      INTERNAL_CLIENT_ID: ${PAYMENT_ORCHESTRATOR_INTERNAL_CLIENT_ID:-payment-orchestrator}
+      INTERNAL_CLIENT_SECRET: ${PAYMENT_ORCHESTRATOR_INTERNAL_CLIENT_SECRET:?PAYMENT_ORCHESTRATOR_INTERNAL_CLIENT_SECRET must be set in .env}
+      # Reserve and capture; the ledger posting the saga waits on before capturing.
+      # It does NOT call payment-service back: the outcome travels as an event, so a
+      # payment-service redeploy delays nothing and cannot fail a saga mid-flight.
+      WALLET_SERVICE_URL: http://wallet-service:8082
+      LEDGER_SERVICE_URL: http://ledger-service:8083
+      # The risk step calls this synchronously: the saga cannot continue without a
+      # verdict, and an event-driven request/reply would park it in a state the
+      # recovery sweep would then read as stalled.
+      FRAUD_SERVICE_URL: http://fraud-service:8086
+      # Deliberately NOT depends_on fraud-service. Both consume payment-created,
+      # so a startup ordering constraint between them buys nothing: an event that
+      # arrives before fraud-service is up is retried, not lost. A dependency here
+      # would only make the boot order look meaningful when it is not.
+      #
+      # FALSE means a payment fails rather than proceeding unassessed when
+      # fraud-service is unreachable. Stricter than the model-down fallback on
+      # purpose: a model outage still leaves the deterministic rules running,
+      # whereas a fraud-service outage leaves no control at all, and recording an
+      # unassessed payment as approved would be a false audit entry.
+      ALLOW_UNASSESSED_PAYMENTS: ${ALLOW_UNASSESSED_PAYMENTS:-false}
+    ports:
+      - "127.0.0.1:8085:8085"
+
+  # ===========================================================================
+  # Intelligence services
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # ml-service: the Python fraud model.
+  #
+  # NOT a *java-service: it has no Postgres, Redis or Kafka dependency at all.
+  # The model is a pure function of its request — fraud-service owns the state,
+  # the read model and the decision — so ml-service needs no database, and
+  # attaching one would invite somebody to put state in it.
+  #
+  # The model is trained at IMAGE BUILD time, not on boot. Training on startup
+  # would give two replicas different models, so the same payment could score
+  # differently depending on which pod answered — indefensible in a dispute. The
+  # artifact is baked in and its version is a behavioural fingerprint (a hash of
+  # its predictions over a fixed probe matrix), so two builds that behave
+  # identically report the same version and two that differ cannot hide it.
+  # ---------------------------------------------------------------------------
+  ml-service:
+    <<: *service-defaults
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: aegis-ml-service
+    environment:
+      PLATFORM_ENV: docker
+      # Scoring is unauthenticated without this. Acceptable on a laptop; in any
+      # shared environment an open scoring endpoint lets anyone map the model's
+      # decision boundary by probing it.
+      ML_API_KEY: ${ML_API_KEY:-}
+      LOG_LEVEL: ${ML_LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:8000:8000"
+    # No healthcheck here on purpose. ml-service's own Dockerfile defines one, and
+    # restating it in compose would give the same check two definitions that drift
+    # - which is exactly the failure the single parameterised Dockerfile.service
+    # exists to avoid for the JVM images. The image's check is liveness (/health),
+    # not readiness: readiness additionally requires the model artifact loaded and
+    # warmed, and a dependent service waiting on service_healthy would stall on
+    # something that is working correctly.
+    deploy:
+      resources:
+        limits:
+          # numpy, pandas and scikit-learn together, plus the loaded model.
+          memory: 1G
+        reservations:
+          memory: 384M
+
+  fraud-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: fraud-service
+        SERVICE_PORT: 8086
+    container_name: aegis-fraud-service
+    # Overrides the *java-service anchor to add ml-service. Restated in full
+    # rather than merged, because a YAML merge key cannot append to a mapping —
+    # writing only ml-service here would silently drop the Postgres, Redis and
+    # Kafka conditions and let this service crash-loop on a connection refusal.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      ml-service:
+        # started, NOT service_healthy. fraud-service is designed to run without
+        # the model: it falls back to its deterministic rules and marks the
+        # verdict degradedMode. Blocking startup on the model would make a slow
+        # model warm-up delay every payment on the platform, which is a worse
+        # outcome than the reduced assurance the fallback already handles.
+        condition: service_started
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8086
+      POSTGRES_USER: aegis_fraud_user
+      POSTGRES_PASSWORD: ${FRAUD_DB_PASSWORD:?FRAUD_DB_PASSWORD must be set in .env}
+      INTERNAL_CLIENT_ID: ${FRAUD_SERVICE_INTERNAL_CLIENT_ID:-fraud-service}
+      INTERNAL_CLIENT_SECRET: ${FRAUD_SERVICE_INTERNAL_CLIENT_SECRET:?FRAUD_SERVICE_INTERNAL_CLIENT_SECRET must be set in .env}
+      ML_SERVICE_URL: http://ml-service:8000
+      # Must match ml-service's own key. Empty means unauthenticated on both
+      # sides, which is consistent rather than broken.
+      ML_API_KEY: ${ML_API_KEY:-}
+      AI_SERVICE_URL: http://ai-investigation-service:8087
+      # Where the risk bands fall. Probabilities, and they only mean anything
+      # because the model is isotonically calibrated: 0.80 reads as a score of 80.
+      # Measured on held-out data at 0.80: precision 0.809, recall 0.441, alert
+      # rate 0.94%.
+      FRAUD_HIGH_RISK_THRESHOLD: ${FRAUD_HIGH_RISK_THRESHOLD:-0.80}
+      FRAUD_MEDIUM_RISK_THRESHOLD: ${FRAUD_MEDIUM_RISK_THRESHOLD:-0.45}
+    ports:
+      - "127.0.0.1:8086:8086"
+
+  ai-investigation-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: ai-investigation-service
+        SERVICE_PORT: 8087
+    container_name: aegis-ai-investigation-service
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8087
+      POSTGRES_USER: aegis_ai_user
+      POSTGRES_PASSWORD: ${AI_DB_PASSWORD:?AI_DB_PASSWORD must be set in .env}
+
+      # Defaults to the offline composer, so the platform runs end to end with no
+      # LLM API key and no outbound network access. Not a stub: it writes a real
+      # report from the evidence and the retrieved policy, flagged
+      # deterministicFallback so an analyst knows what they are reading.
+      AI_PROVIDER: ${AI_PROVIDER:-local}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      # Empty by default. A missing key only WARNS and falls back to the composer,
+      # which is the opposite of how a failure to seed the knowledge base is
+      # handled - that prevents startup. A fallback generator still produces a
+      # truthful report; there is no fallback for having no policy to reason from.
+      AI_API_KEY: ${AI_API_KEY:-}
+      # Set this to reach a self-hosted or OpenAI-compatible gateway instead,
+      # which is how a deployment that will not send payment data to a third party
+      # can still use a language model.
+      AI_API_BASE_URL: ${AI_API_BASE_URL:-}
+      AI_REQUEST_TIMEOUT: ${AI_REQUEST_TIMEOUT:-20s}
+      AI_FALLBACK_TO_LOCAL: ${AI_FALLBACK_TO_LOCAL:-true}
+
+      # Retrieval. The similarity floor is the number that matters: without it an
+      # approximate nearest-neighbour search returns its k nearest neighbours
+      # however irrelevant, and the narrative cites them as though they mattered.
+      RAG_TOP_K: ${RAG_TOP_K:-5}
+      RAG_MINIMUM_SIMILARITY: ${RAG_MINIMUM_SIMILARITY:-0.28}
+      RAG_ALWAYS_INCLUDE_RULE_POLICIES: ${RAG_ALWAYS_INCLUDE_RULE_POLICIES:-true}
+
+      # The corpus is seeded and embedded at startup by the running code, because
+      # a vector cannot be computed by a migration and pre-computed vectors in SQL
+      # would drift away from the embedder that queries them with nothing to
+      # detect it.
+      RAG_SEED_ON_STARTUP: ${RAG_SEED_ON_STARTUP:-true}
+    ports:
+      - "127.0.0.1:8087:8087"
+
+  # ===========================================================================
+  # Supporting services
+  # ===========================================================================
+
+  notification-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: notification-service
+        SERVICE_PORT: 8088
+    container_name: aegis-notification-service
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8088
+      POSTGRES_USER: aegis_notification_user
+      POSTGRES_PASSWORD: ${NOTIFICATION_DB_PASSWORD:?NOTIFICATION_DB_PASSWORD must be set in .env}
+      INTERNAL_CLIENT_ID: ${NOTIFICATION_SERVICE_INTERNAL_CLIENT_ID:-notification-service}
+      INTERNAL_CLIENT_SECRET: ${NOTIFICATION_SERVICE_INTERNAL_CLIENT_SECRET:?NOTIFICATION_SERVICE_INTERNAL_CLIENT_SECRET must be set in .env}
+
+      # SIMULATED transports. No SMTP relay and no SMS gateway is contacted,
+      # exactly as no real bank, card network or UPI switch is. What is NOT
+      # simulated is everything around the send: rendering, escaping, per-channel
+      # idempotency, the retry schedule, the dead-letter queue and the audit trail
+      # all behave identically either way, because they sit above the transport
+      # interface.
+      NOTIFICATION_EMAIL_ENABLED: ${NOTIFICATION_EMAIL_ENABLED:-true}
+      NOTIFICATION_SMS_ENABLED: ${NOTIFICATION_SMS_ENABLED:-true}
+
+      # Zero by default. Raising it is how the dead-letter path gets exercised
+      # deliberately - a queue that only fills during a real outage is a mechanism
+      # nobody has seen work. A non-zero default would make every local run
+      # produce dead letters and teach everyone to ignore the queue.
+      NOTIFICATION_SIMULATED_FAILURE_RATE: ${NOTIFICATION_SIMULATED_FAILURE_RATE:-0.0}
+
+      NOTIFICATION_EMAIL_FROM: ${NOTIFICATION_EMAIL_FROM:-no-reply@aegispay.local}
+      NOTIFICATION_EMAIL_FROM_NAME: ${NOTIFICATION_EMAIL_FROM_NAME:-AegisPay}
+      NOTIFICATION_SMS_SENDER_ID: ${NOTIFICATION_SMS_SENDER_ID:-AEGISPAY}
+
+      # Delivery retry, which is SEPARATE from the Kafka retry. A send failure is
+      # committed as state and drained from the database by a scheduled worker,
+      # because backing off a Kafka partition because one SMTP host is slow would
+      # stop every later notification to every other customer.
+      NOTIFICATION_MAX_ATTEMPTS: ${NOTIFICATION_MAX_ATTEMPTS:-8}
+      NOTIFICATION_INITIAL_BACKOFF: ${NOTIFICATION_INITIAL_BACKOFF:-30s}
+      NOTIFICATION_MAX_BACKOFF: ${NOTIFICATION_MAX_BACKOFF:-10m}
+      NOTIFICATION_RETRY_JITTER: ${NOTIFICATION_RETRY_JITTER:-0.25}
+    ports:
+      - "127.0.0.1:8088:8088"
+
+  analytics-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        MODULE: analytics-service
+        SERVICE_PORT: 8089
+    container_name: aegis-analytics-service
+    environment:
+      <<: *java-env
+      SERVER_PORT: 8089
+      POSTGRES_USER: aegis_analytics_user
+      POSTGRES_PASSWORD: ${ANALYTICS_DB_PASSWORD:?ANALYTICS_DB_PASSWORD must be set in .env}
+      INTERNAL_CLIENT_ID: ${ANALYTICS_SERVICE_INTERNAL_CLIENT_ID:-analytics-service}
+      INTERNAL_CLIENT_SECRET: ${ANALYTICS_SERVICE_INTERNAL_CLIENT_SECRET:?ANALYTICS_SERVICE_INTERNAL_CLIENT_SECRET must be set in .env}
+      ANALYTICS_STALE_AFTER: ${ANALYTICS_STALE_AFTER:-2m}
+      ANALYTICS_REPORTING_CURRENCY: ${ANALYTICS_REPORTING_CURRENCY:-INR}
+      ANALYTICS_MAX_PAGE_SIZE: ${ANALYTICS_MAX_PAGE_SIZE:-100}
+    ports:
+      - "127.0.0.1:8089:8089"
+
+  # ===========================================================================
+  # Admin dashboard
+  #
+  # Not a *java-service: it needs no database, no cache and no broker. It is a
+  # directory of static assets served by nginx, and its only dependency is the
+  # gateway — at runtime, in the operator's browser, not from this container.
+  # ===========================================================================
+
+  frontend:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.frontend
+      args:
+        VITE_APP_NAME: ${VITE_APP_NAME:-AegisPay}
+    container_name: aegis-frontend
+    environment:
+      API_UPSTREAM: http://api-gateway:8080
+    ports:
+      # Loopback only, unlike the gateway. This console lists every payment on the
+      # platform and can release or reject a held one; it should not be reachable
+      # from the network just because compose is running on a shared machine.
+      - "127.0.0.1:5173:8080"
+    depends_on:
+      api-gateway:
+        # Started, not healthy. The dashboard serves its login page perfectly well
+        # while the gateway is still coming up, and waiting would mean nothing to
+        # look at during the slowest part of a cold start. The browser retries.
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          # nginx serving a 300 kB bundle. The JVM services' 768M would be
+          # reserving memory that nothing here can use.
+          memory: 128M
+        reservations:
+          memory: 32M
+
+# =============================================================================
+networks:
+  aegis:
+    name: aegis-network
+    driver: bridge
+
+volumes:
+  postgres-data:
+    name: aegis-postgres-data
+  redis-data:
+    name: aegis-redis-data
+  kafka-data:
+    name: aegis-kafka-data

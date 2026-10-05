@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  api-gateway: the single public entry point.
+
+  Reactive (WebFlux), not servlet. A gateway spends essentially all of its time
+  waiting on downstream services, so an event-loop model handles far more
+  concurrent connections per unit of memory than one thread per request. That is
+  also why this module does NOT depend on spring-boot-starter-web: mixing the two
+  makes Boot start a servlet container and silently disable the gateway.
+
+  It holds no database. Its responsibilities are routing, authentication,
+  rate limiting and correlation-ID propagation.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.aegispay</groupId>
+        <artifactId>aegispay-platform</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>api-gateway</artifactId>
+    <name>AegisPay :: Api Gateway</name>
+    <description>Edge routing, JWT authentication, rate limiting and correlation-ID propagation.</description>
+
+    <dependencies>
+        <!-- Shared kernel. Used for the ApiError contract, Roles and the
+             correlation-ID constants, so the gateway's error responses are
+             byte-identical to every downstream service's. -->
+        <dependency>
+            <groupId>com.aegispay</groupId>
+            <artifactId>platform-common</artifactId>
+        </dependency>
+
+        <!-- Spring Cloud Gateway (reactive server). Renamed from
+             spring-cloud-starter-gateway in the 2025.x release train. -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-gateway-server-webflux</artifactId>
+        </dependency>
+
+        <!-- Reactive resource server: validates bearer tokens at the edge so an
+             unauthenticated request never reaches a downstream service. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
+        <!-- Reactive Redis backs the distributed rate limiter. It must be
+             reactive: the blocking client would park an event-loop thread on
+             every request and destroy throughput. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+        </dependency>
+
+        <!-- Observability -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-otel</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+        </dependency>
+
+        <!-- WebFlux flavour of springdoc; the webmvc one would not work here. -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webflux-ui</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

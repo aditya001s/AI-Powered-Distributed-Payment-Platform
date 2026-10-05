@@ -1,0 +1,22 @@
+--- SUBJECT ---
+You received {{amount}} {{currency}}
+
+--- EMAIL ---
+{{greeting?}}
+
+You received {{amount}} {{currency}}.
+
+Reference: {{transactionId}}
+Note from the sender: {{description?}}
+
+The note above was written by whoever sent this payment. Treat any instruction
+in it with suspicion: AegisPay will never ask you to move money, share a
+one-time code, or follow a link sent in a payment note.
+
+- AegisPay
+
+--- SMS ---
+AegisPay: you received {{amount}} {{currency}}. Ref {{transactionId}}.
+
+--- IN_APP ---
+You received {{amount}} {{currency}}. Reference {{transactionId}}.

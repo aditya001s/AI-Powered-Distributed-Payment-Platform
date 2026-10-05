@@ -1,0 +1,14 @@
+AegisPay {{ .Chart.AppVersion }} has been rendered for namespace {{ .Release.Namespace }}.
+
+Runtime Secret: {{ include "aegispay.runtimeSecret" . }}
+Gateway Service: {{ include "aegispay.componentName" (list . "api-gateway") }}:8080
+Frontend Service: {{ include "aegispay.componentName" (list . "frontend") }}:8080
+
+{{- if .Values.monitoring.enabled }}
+Grafana:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "aegispay.componentName" (list . "grafana") }} 3000:3000
+{{- end }}
+
+{{- if not .Values.ingress.enabled }}
+Ingress is disabled. Port-forward the gateway or set ingress.enabled=true with a reviewed host and TLS configuration.
+{{- end }}

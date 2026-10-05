@@ -1,0 +1,58 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+
+    /*
+     * `vite/client` declares `import.meta.env`, which the API client reads to find
+     * the gateway. Without it that read is a type error, and the tempting fix - an
+     * `any` cast - would also silence a genuine typo in a variable name.
+     */
+    "types": ["vitest/globals", "vite/client"],
+
+    /*
+     * Strict, and every flag below it is deliberate rather than copied.
+     *
+     * This application's whole job is rendering numbers about money and risk, and
+     * the failure mode of a loose type here is a tile that renders "NaN" or
+     * "undefined" to an operator making a decision about somebody's payment. A
+     * compile error is a much cheaper place to find that.
+     */
+    "strict": true,
+
+    /*
+     * The one that matters most for this codebase. Every API response field that
+     * the backend documents as nullable - a null successRate, a null lagSeconds,
+     * an absent modelVersion in degraded mode - has to be handled explicitly
+     * rather than read straight into a template string.
+     */
+    "strictNullChecks": true,
+
+    /* An unchecked index access is how a chart with no data points renders NaN. */
+    "noUncheckedIndexedAccess": true,
+
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+
+    /*
+     * Forces every switch over a backend enum to be exhaustive. When a new
+     * PaymentStatus or RiskLevel is added server-side, the status badge and the
+     * risk colour scale fail to compile rather than silently rendering the new
+     * value as unstyled text.
+     */
+    "noImplicitReturns": true,
+
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true
+  },
+  "include": ["src", "vite.config.ts"]
+}

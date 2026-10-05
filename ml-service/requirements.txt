@@ -1,0 +1,26 @@
+# AegisPay ml-service — fraud scoring.
+#
+# Pinned exactly, not to a range. A gradient-boosted model is serialised against the
+# scikit-learn build that produced it, so an unpinned minor upgrade can change predictions
+# or refuse to unpickle at all — and the symptom would be a fraud model that silently scores
+# differently after an unrelated rebuild.
+#
+# The model version recorded on every assessment is a fingerprint of the model's own
+# predictions, so a dependency change that alters behaviour shows up as a changed version
+# rather than as a mystery.
+
+# ---- serving ----
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.13.5
+
+# ---- the model ----
+# scikit-learn brings joblib (artifact persistence) and threadpoolctl transitively.
+scikit-learn==1.8.0
+numpy==2.4.3
+scipy==1.17.1
+
+# ---- tests ----
+# httpx backs Starlette's TestClient.
+pytest==9.1.1
+httpx==0.28.1

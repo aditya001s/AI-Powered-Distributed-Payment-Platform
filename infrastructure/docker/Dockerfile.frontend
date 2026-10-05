@@ -1,0 +1,99 @@
+# =============================================================================
+# Admin dashboard: build once, serve from any environment.
+#
+#   docker build -f infrastructure/docker/Dockerfile.frontend -t aegispay/frontend .
+#
+# Browser requests use same-origin /api paths. Kubernetes Ingress routes those
+# paths directly to the gateway; nginx proxies them for Compose and direct
+# frontend access using the runtime-only API_UPSTREAM setting. No environment URL
+# is embedded in the immutable JavaScript bundle.
+#
+# Build arguments remain public by definition. This image accepts branding only;
+# no credential or environment-specific endpoint belongs in a build argument.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: build
+#
+# A pinned minor version rather than node:lts. An lts tag moves to a new major
+# release on its own schedule and can change build behaviour between two builds
+# of the same commit.
+# -----------------------------------------------------------------------------
+FROM node:22.19-alpine AS build
+
+WORKDIR /build
+
+# ---- Dependency layer ----
+# The manifest and lockfile alone first, so editing a component does not
+# reinstall the dependency tree. Only a manifest change invalidates this layer.
+COPY frontend/package.json frontend/package-lock.json ./
+
+# `npm ci`, not `npm install`: it installs exactly what the lockfile pins and
+# fails if the manifest and lockfile disagree. `install` would happily resolve a
+# newer transitive dependency, which makes the image non-reproducible and is how a
+# supply-chain change arrives unannounced.
+RUN npm ci
+
+# ---- Source layer ----
+COPY frontend/ ./
+
+# Browser API calls are root-relative and therefore environment-neutral. Branding
+# remains a public build-time value.
+ARG VITE_APP_NAME=AegisPay
+ENV VITE_APP_NAME=${VITE_APP_NAME}
+
+# `npm run build` is `tsc --noEmit && vite build`, so a type error fails the image
+# rather than shipping a bundle that renders "undefined" where a number should be.
+# Type checking is not a separate CI nicety here; it is the build.
+RUN npm run build
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime
+#
+# nginx serving static files. No Node in the final image: once built the
+# application is a directory of assets, and shipping a runtime that can execute
+# arbitrary JavaScript to serve them is attack surface for nothing.
+# -----------------------------------------------------------------------------
+FROM nginx:1.27-alpine AS runtime
+
+LABEL org.opencontainers.image.title="AegisPay admin dashboard" \
+      org.opencontainers.image.description="Operations and fraud console for the AegisPay platform" \
+      org.opencontainers.image.vendor="AegisPay" \
+      org.opencontainers.image.licenses="MIT"
+
+COPY infrastructure/docker/nginx/dashboard.conf /etc/nginx/templates/default.conf.template
+
+# The official nginx entrypoint renders only API_UPSTREAM into /tmp. /tmp is the
+# chart's writable emptyDir, so runtime configuration remains compatible with a
+# read-only root filesystem. Validate the template during the image build too.
+RUN sed -i 's|include /etc/nginx/conf.d/\*.conf;|include /tmp/*.conf;|' /etc/nginx/nginx.conf \
+ && API_UPSTREAM=http://127.0.0.1:8080 envsubst '${API_UPSTREAM}' \
+      < /etc/nginx/templates/default.conf.template > /tmp/default.conf \
+ && nginx -t -c /etc/nginx/nginx.conf \
+ && rm -f /tmp/default.conf
+
+ENV NGINX_ENVSUBST_FILTER=^API_UPSTREAM$ \
+    NGINX_ENVSUBST_OUTPUT_DIR=/tmp
+
+COPY --from=build /build/dist /usr/share/nginx/html
+
+# ---- Run as a non-root user ----
+#
+# The nginx image ships an `nginx` user but runs its master process as root so it
+# can bind port 80. Port 8080 needs no privilege, so the whole process runs
+# unprivileged. The paths nginx writes to have to be handed over first, or it
+# fails at startup trying to create its pid file.
+RUN touch /var/run/nginx.pid \
+ && chown -R nginx:nginx /var/run/nginx.pid /var/cache/nginx /usr/share/nginx/html \
+ && sed -i '/^user /d' /etc/nginx/nginx.conf
+
+USER nginx:nginx
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+
+# `daemon off` keeps nginx in the foreground as PID 1 so it receives SIGTERM
+# directly. Daemonising would make the container exit immediately.
+CMD ["nginx", "-g", "daemon off;"]

@@ -1,0 +1,294 @@
+global:
+  image:
+    registry: ghcr.io
+    namespace: your-organization
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  platformEnvironment: kubernetes
+  # Set to production to activate hard chart assertions even outside GitHub Actions.
+  deploymentProfile: evaluation
+  logLevel: INFO
+  logJson: "true"
+  publicGatewayUrl: https://api.aegispay.example
+  jwtIssuer: https://auth.aegispay.example
+  tracingSamplingProbability: "0.10"
+
+nameOverride: ""
+fullnameOverride: ""
+
+runtimeSecret:
+  # Increment when the external Secret changes to roll all credential consumers.
+  version: "1"
+  # Create this Secret from secrets.template.yaml or an external secret manager.
+  existingSecret: aegispay-runtime
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+applicationSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+
+persistence:
+  storageClass: ""
+
+images:
+  busybox: busybox:1.37.0
+
+services:
+  api-gateway:
+    kind: java
+    image: api-gateway
+    port: 8080
+    replicas: 2
+    database: ""
+    redis: true
+    kafka: false
+    serviceAuth: false
+    public: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  auth-service:
+    kind: java
+    image: auth-service
+    port: 8081
+    replicas: 2
+    database: aegis_auth
+    databaseVariable: AUTH_DB_NAME
+    redis: false
+    kafka: false
+    serviceAuth: false
+    jwtSigningKeys: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  wallet-service:
+    kind: java
+    image: wallet-service
+    port: 8082
+    replicas: 2
+    database: aegis_wallet
+    databaseVariable: WALLET_DB_NAME
+    redis: true
+    kafka: true
+    serviceAuth: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  ledger-service:
+    kind: java
+    image: ledger-service
+    port: 8083
+    replicas: 2
+    database: aegis_ledger
+    databaseVariable: LEDGER_DB_NAME
+    redis: false
+    kafka: true
+    serviceAuth: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  payment-service:
+    kind: java
+    image: payment-service
+    port: 8084
+    replicas: 2
+    database: aegis_payment
+    databaseVariable: PAYMENT_DB_NAME
+    redis: true
+    kafka: true
+    serviceAuth: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  payment-orchestrator:
+    kind: java
+    image: payment-orchestrator
+    port: 8085
+    replicas: 2
+    database: aegis_orchestrator
+    databaseVariable: ORCHESTRATOR_DB_NAME
+    redis: true
+    kafka: true
+    serviceAuth: true
+    resources:
+      requests: { cpu: 150m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  fraud-service:
+    kind: java
+    image: fraud-service
+    port: 8086
+    replicas: 2
+    database: aegis_fraud
+    databaseVariable: FRAUD_DB_NAME
+    redis: true
+    kafka: true
+    serviceAuth: true
+    mlApiKey: true
+    resources:
+      requests: { cpu: 150m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  ai-investigation-service:
+    kind: java
+    image: ai-investigation-service
+    port: 8087
+    replicas: 2
+    database: aegis_ai
+    databaseVariable: AI_DB_NAME
+    redis: false
+    kafka: true
+    serviceAuth: false
+    aiApiKey: true
+    resources:
+      requests: { cpu: 150m, memory: 384Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  notification-service:
+    kind: java
+    image: notification-service
+    port: 8088
+    replicas: 2
+    database: aegis_notification
+    databaseVariable: NOTIFICATION_DB_NAME
+    redis: true
+    kafka: true
+    serviceAuth: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  analytics-service:
+    kind: java
+    image: analytics-service
+    port: 8089
+    replicas: 2
+    database: aegis_analytics
+    databaseVariable: ANALYTICS_DB_NAME
+    redis: true
+    kafka: true
+    serviceAuth: true
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 768Mi }
+  ml-service:
+    kind: ml
+    image: ml-service
+    port: 8000
+    replicas: 2
+    mlApiKey: true
+    resources:
+      requests: { cpu: 250m, memory: 384Mi }
+      limits: { cpu: "2", memory: 1Gi }
+  frontend:
+    kind: frontend
+    image: frontend
+    port: 8080
+    replicas: 2
+    public: true
+    resources:
+      requests: { cpu: 25m, memory: 32Mi }
+      limits: { cpu: 250m, memory: 128Mi }
+
+applicationConfig:
+  defaultCurrency: INR
+  allowUnassessedPayments: "false"
+  fraudHighRiskThreshold: "0.80"
+  fraudMediumRiskThreshold: "0.45"
+  aiProvider: local
+  aiModel: gpt-4o-mini
+  aiApiBaseUrl: ""
+  demoSeedEnabled: "false"
+
+infrastructure:
+  postgresql:
+    enabled: true
+    host: ""
+    port: 5432
+    username: aegis_admin
+    sslMode: verify-full
+    rootCertificateKey: postgres-ca.crt
+    image: pgvector/pgvector:pg17
+    storage: 20Gi
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: "2", memory: 2Gi }
+  redis:
+    enabled: true
+    host: ""
+    port: 6379
+    sslEnabled: true
+    image: redis:7.4-alpine
+    storage: 5Gi
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+  kafka:
+    enabled: true
+    bootstrapServers: ""
+    securityProtocol: SASL_SSL
+    saslMechanism: SCRAM-SHA-512
+    saslJaasConfigKey: KAFKA_SASL_JAAS_CONFIG
+    truststoreKey: ""
+    truststorePasswordKey: KAFKA_TRUSTSTORE_PASSWORD
+    image: apache/kafka:3.9.1
+    storage: 20Gi
+    clusterId: aegispay-kubernetes-cluster-1
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: "2", memory: 2Gi }
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  host: aegispay.example
+  tls: []
+
+networkPolicy:
+  enabled: true
+  # Override for the namespace label used by the selected ingress controller.
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+monitoring:
+  enabled: true
+  externalOtlpEndpoint: ""
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    storage: 20Gi
+    retention: 15d
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  grafana:
+    image: grafana/grafana:12.1.0
+    storage: 5Gi
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+  tempo:
+    image: grafana/tempo:2.8.2
+    storage: 20Gi
+    retention: 168h
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  otelCollector:
+    image: otel/opentelemetry-collector-contrib:0.132.0
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 512Mi }

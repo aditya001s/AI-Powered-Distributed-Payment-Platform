@@ -1,0 +1,270 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegispay.fullname" . }}-prometheus-config
+  labels:
+    {{- include "aegispay.labels" . | nindent 4 }}
+data:
+  prometheus.yml: |-
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+      external_labels:
+        platform: aegispay
+        namespace: {{ .Release.Namespace | quote }}
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    scrape_configs:
+      - job_name: aegispay-services
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [{{ .Release.Namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+            action: replace
+            target_label: application
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+  alerts.yml: |-
+    groups:
+      - name: aegispay-money-safety
+        rules:
+          - alert: SagaCompensationFailed
+            expr: sum(increase(aegis_saga_compensation_failed_total[5m])) > 0
+            for: 0m
+            labels: { severity: critical, team: payments }
+            annotations:
+              summary: A saga compensation failed
+              description: A wallet reservation or provider authorization may be stranded.
+          - alert: SagaHasUncompensatedEffects
+            expr: max(aegis_saga_uncompensated) > 0
+            for: 1m
+            labels: { severity: critical, team: payments }
+            annotations:
+              summary: Uncompensated saga side effects exist
+              description: Manual reconciliation is required before customer funds can be trusted.
+          - alert: SagaRecoveryFailed
+            expr: sum(increase(aegis_saga_recovery_failed_total[5m])) > 0
+            labels: { severity: critical, team: payments }
+            annotations: { summary: Stalled-saga recovery failed }
+          - alert: LedgerIntegrityControlFired
+            expr: sum(increase(aegis_ledger_trial_balance_failed_total[5m])) + sum(increase(aegis_ledger_reconciliation_drift_total[5m])) + sum(increase(aegis_ledger_imbalance_rejected_total[5m])) > 0
+            labels: { severity: critical, team: payments }
+            annotations: { summary: A ledger balance or reconciliation invariant failed }
+      - name: aegispay-delivery-and-events
+        rules:
+          - alert: NotificationDeadLettered
+            expr: sum by (channel) (increase(aegis_notification_dead_lettered_total[5m])) > 0
+            labels: { severity: critical, team: platform }
+            annotations: { summary: A customer notification exhausted all delivery attempts }
+          - alert: MissingNotificationTemplate
+            expr: sum by (channel) (increase(aegis_notification_suppressed_total{reason="NO_TEMPLATE"}[15m])) > 0
+            labels: { severity: warning, team: platform }
+            annotations: { summary: Notification events reference an unknown template }
+          - alert: DurableEventDeliveryFailed
+            expr: sum(increase(aegis_outbox_failed_total[5m])) + sum(increase(aegis_events_dead_lettered_total[5m])) > 0
+            labels: { severity: critical, team: platform }
+            annotations: { summary: An outbox event or consumed Kafka record exhausted retries }
+          - alert: KafkaPublishFailures
+            expr: sum(increase(aegis_events_publish_failed_total[5m])) > 0
+            labels: { severity: critical, team: platform }
+            annotations:
+              summary: Kafka event publication is failing
+              description: Check broker availability, client authentication, and network connectivity.
+          - alert: KafkaEventDeliveryStalled
+            expr: max by (application) (aegis_outbox_pending) > 0 unless on(application) (sum by (application) (increase(aegis_outbox_published_total[10m])) > 0)
+            labels: { severity: critical, team: platform }
+            annotations:
+              summary: Pending events are not reaching Kafka for {{`{{ $labels.application }}`}}
+              description: This service has pending durable-outbox work but has not published an event for ten minutes.
+          - alert: NotificationRetryBacklogGrowing
+            expr: deriv(aegis_notification_retry_backlog[15m]) > 0
+            for: 15m
+            labels: { severity: warning, team: platform }
+            annotations: { summary: Notification retry backlog is not draining }
+      - name: aegispay-security-and-fraud
+        rules:
+          - alert: RefreshTokenReuseDetected
+            expr: sum(increase(aegis_auth_refresh_reuse_detected_total[5m])) > 0
+            labels: { severity: critical, team: security }
+            annotations: { summary: A consumed refresh token was reused }
+          - alert: AIGuardrailViolation
+            expr: sum(increase(aegis_ai_citation_hallucinated_total[5m])) + sum(increase(aegis_ai_recommendation_rejected_total[5m])) > 0
+            labels: { severity: critical, team: fraud }
+            annotations: { summary: AI investigation produced fabricated evidence or an invalid recommendation }
+          - alert: FraudOperatingWithoutModel
+            expr: sum(rate(aegis_fraud_degraded_decision_total[10m])) > 0
+            for: 5m
+            labels: { severity: warning, team: fraud }
+            annotations: { summary: Fraud decisions are being made without the ML model }
+          - alert: MLModelUnavailable
+            expr: min_over_time(aegis_ml_up[2m]) == 0
+            for: 2m
+            labels: { severity: critical, team: fraud }
+            annotations: { summary: The fraud model is not loaded and ready }
+      - name: aegispay-golden-signals
+        rules:
+          - alert: AegisPayTargetDown
+            expr: up{job="aegispay-services"} == 0
+            for: 5m
+            labels: { severity: critical, team: platform }
+            annotations: { summary: An AegisPay metrics target is unreachable }
+          - alert: HighHttpServerErrorRate
+            expr: sum by (application) (rate(http_server_requests_seconds_count{status=~"5.."}[5m])) / clamp_min(sum by (application) (rate(http_server_requests_seconds_count[5m])), 0.001) > 0.05
+            for: 10m
+            labels: { severity: warning, team: platform }
+            annotations: { summary: HTTP 5xx rate exceeds five percent }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegispay.fullname" . }}-tempo-config
+  labels:
+    {{- include "aegispay.labels" . | nindent 4 }}
+data:
+  tempo.yaml: |-
+    server:
+      http_listen_port: 3200
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc: { endpoint: 0.0.0.0:4317 }
+            http: { endpoint: 0.0.0.0:4318 }
+    ingester:
+      max_block_duration: 5m
+    compactor:
+      compaction:
+        block_retention: {{ .Values.monitoring.tempo.retention }}
+    storage:
+      trace:
+        backend: local
+        wal: { path: /var/tempo/wal }
+        local: { path: /var/tempo/blocks }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegispay.fullname" . }}-otel-config
+  labels:
+    {{- include "aegispay.labels" . | nindent 4 }}
+data:
+  collector.yaml: |-
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      otlp:
+        protocols:
+          grpc: { endpoint: 0.0.0.0:4317 }
+          http:
+            endpoint: 0.0.0.0:4318
+            cors:
+              allowed_origins: []
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 400
+        spike_limit_mib: 100
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+    exporters:
+      otlp/tempo:
+        endpoint: {{ include "aegispay.componentName" (list . "tempo") }}:4317
+        tls: { insecure: true }
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/tempo]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegispay.fullname" . }}-grafana-provisioning
+  labels:
+    {{- include "aegispay.labels" . | nindent 4 }}
+data:
+  datasources.yaml: |-
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://{{ include "aegispay.componentName" (list . "prometheus") }}:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          exemplarTraceIdDestinations:
+            - name: traceId
+              datasourceUid: tempo
+      - name: Tempo
+        uid: tempo
+        type: tempo
+        access: proxy
+        url: http://{{ include "aegispay.componentName" (list . "tempo") }}:3200
+        editable: false
+        jsonData:
+          tracesToMetrics:
+            datasourceUid: prometheus
+          serviceMap:
+            datasourceUid: prometheus
+  dashboards.yaml: |-
+    apiVersion: 1
+    providers:
+      - name: AegisPay
+        folder: AegisPay
+        type: file
+        disableDeletion: true
+        editable: false
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegispay.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "aegispay.labels" . | nindent 4 }}
+data:
+  aegispay-overview.json: |-
+    {
+      "annotations": {"list": []},
+      "editable": false,
+      "graphTooltip": 1,
+      "panels": [
+        {"type":"stat","title":"Services up","id":1,"gridPos":{"h":5,"w":6,"x":0,"y":0},"targets":[{"expr":"sum(up{job=\"aegispay-services\"})","legendFormat":"targets"}]},
+        {"type":"timeseries","title":"HTTP request rate","id":2,"gridPos":{"h":8,"w":9,"x":6,"y":0},"targets":[{"expr":"sum by (application) (rate(http_server_requests_seconds_count[5m]))","legendFormat":"{{`{{application}}`}}"}]},
+        {"type":"timeseries","title":"HTTP p95 latency","id":3,"gridPos":{"h":8,"w":9,"x":15,"y":0},"targets":[{"expr":"histogram_quantile(0.95, sum by (le, application) (rate(http_server_requests_seconds_bucket[5m])))","legendFormat":"{{`{{application}}`}}"}]},
+        {"type":"stat","title":"Uncompensated sagas","id":4,"gridPos":{"h":5,"w":6,"x":0,"y":5},"targets":[{"expr":"max(aegis_saga_uncompensated)"}]},
+        {"type":"timeseries","title":"Payment outcomes","id":5,"gridPos":{"h":8,"w":8,"x":0,"y":10},"targets":[{"expr":"sum by (outcome) (rate(aegis_payment_outcome_total[5m]))","legendFormat":"{{`{{outcome}}`}}"}]},
+        {"type":"timeseries","title":"Provider fallback rate","id":6,"gridPos":{"h":8,"w":8,"x":8,"y":10},"targets":[{"expr":"sum by (from, to) (rate(aegis_provider_fallback_total[5m]))","legendFormat":"{{`{{from}}`}} → {{`{{to}}`}}"}]},
+        {"type":"timeseries","title":"Fraud decisions without model","id":7,"gridPos":{"h":8,"w":8,"x":16,"y":10},"targets":[{"expr":"sum(rate(aegis_fraud_degraded_decision_total[10m]))","legendFormat":"degraded"}]},
+        {"type":"timeseries","title":"Durable delivery failures","id":8,"gridPos":{"h":8,"w":8,"x":0,"y":18},"targets":[{"expr":"sum by (application) (rate(aegis_outbox_failed_total[5m]))","legendFormat":"outbox {{`{{application}}`}}"},{"expr":"sum by (application) (rate(aegis_events_dead_lettered_total[5m]))","legendFormat":"DLT {{`{{application}}`}}"}]},
+        {"type":"timeseries","title":"Notification retry backlog","id":9,"gridPos":{"h":8,"w":8,"x":8,"y":18},"targets":[{"expr":"aegis_notification_retry_backlog","legendFormat":"backlog"}]},
+        {"type":"timeseries","title":"AI guardrail violations","id":10,"gridPos":{"h":8,"w":8,"x":16,"y":18},"targets":[{"expr":"sum(increase(aegis_ai_citation_hallucinated_total[5m]))","legendFormat":"hallucinated citations"},{"expr":"sum(increase(aegis_ai_recommendation_rejected_total[5m]))","legendFormat":"rejected recommendations"}]}
+      ],
+      "refresh": "30s",
+      "schemaVersion": 40,
+      "tags": ["aegispay", "phase-10"],
+      "templating": {"list": []},
+      "time": {"from":"now-6h","to":"now"},
+      "title": "AegisPay Platform Overview",
+      "uid": "aegispay-overview",
+      "version": 1
+    }
+{{- end }}

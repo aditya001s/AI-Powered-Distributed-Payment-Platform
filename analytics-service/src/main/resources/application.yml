@@ -1,0 +1,127 @@
+###############################################################################
+# analytics-service
+#
+# Admin analytics and platform read models. Builds read-optimised
+# projections from the event stream: transaction volume and success rate,
+# fraud rate, provider health, latency percentiles and high-risk transaction
+# lists for the admin dashboard.
+#
+# Hosts and secrets come from the environment. Shared platform defaults are
+# imported from platform-common's aegis-defaults.yml, which this file overrides.
+###############################################################################
+
+spring:
+  application:
+    name: analytics-service
+
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${ANALYTICS_DB_NAME:aegis_analytics}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    locations: classpath:db/migration
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. validate turns a mapping/schema mismatch into a
+      # startup failure instead of a silent ALTER against a live database.
+      ddl-auto: validate
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys are fetched from the auth service. This service therefore
+          # holds no signing material and cannot mint a token, so compromising it
+          # does not yield the ability to forge identities.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+server:
+  port: ${SERVER_PORT:8089}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  openapi:
+    description: >-
+      Builds read-optimised projections from the event stream: transaction volume and success rate, fraud rate, provider health, latency percentiles and high-risk transaction lists for the admin dashboard.
+
+  # Use the shared deny-by-default resource-server chain from platform-common.
+  security:
+    standard-chain:
+      enabled: true
+
+  # Credentials for outbound service-to-service calls (OAuth2 client credentials).
+  service-auth:
+    enabled: true
+    token-uri: ${AUTH_SERVICE_URL:http://localhost:8081}/api/auth/token
+    client-id: ${INTERNAL_CLIENT_ID:aegis-internal}
+    client-secret: ${INTERNAL_CLIENT_SECRET:}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # A distinct group per service: each one needs its own copy of every event.
+    # Sharing a group id would make services steal each other's partitions.
+    consumer-group-id: analytics-service
+
+  outbox:
+    # This service emits no domain events of its own. It is a read model: it
+    # consumes the event stream and publishes nothing back into it.
+    enabled: false
+
+  # ----------------------------------------------------------------- analytics
+  analytics:
+    # Lag beyond which a stream is reported stale. NOT a hard failure - the API
+    # still answers and still returns the numbers it has. It sets the flag that
+    # tells a reader the figures are historical.
+    #
+    # Because a projection that stops updating does not go blank. It keeps serving
+    # the last numbers it had, confidently, and an operator reading "0 payments
+    # held for review" cannot tell whether the queue is clear or the consumer died
+    # three hours ago - which call for opposite responses.
+    #
+    # Two minutes is chosen against the platform's own cadence: the outbox drains
+    # every 200ms and consumers commit per record, so healthy lag is sub-second.
+    # Two minutes is far enough above that to absorb a rolling restart without
+    # crying wolf, and short enough that a dead consumer is flagged while somebody
+    # is still looking.
+    stale-after: ${ANALYTICS_STALE_AFTER:2m}
+
+    # The label on aggregate totals. Aggregates sum minor units across rows, and
+    # minor units are only comparable within one currency.
+    #
+    # This service does NOT convert. It has no rate source, and inventing one
+    # would produce authoritative-looking totals derived from a made-up number.
+    # So this label is honest only while the platform is single-currency, and
+    # multi-currency support means grouping by currency in every aggregate rather
+    # than adding a conversion here.
+    reporting-currency: ${ANALYTICS_REPORTING_CURRENCY:INR}
+
+    # Bounded because the payment list is platform-wide. A customer-scoped
+    # endpoint is naturally limited by how many payments one person made; this one
+    # is limited only by what a caller asks for.
+    maximum-page-size: ${ANALYTICS_MAX_PAGE_SIZE:100}
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+

@@ -1,0 +1,443 @@
+###############################################################################
+# api-gateway
+#
+# The single public entry point. Routes to ten services, authenticates at the
+# edge, rate limits per user (or per IP when anonymous), and propagates a
+# correlation ID so one request is traceable across every hop.
+#
+# Route ordering note: Spring Cloud Gateway evaluates predicates in declaration
+# order, so the narrow auth routes MUST come before the broad ones. If the
+# catch-all /api/auth/** route were declared first, the stricter login bucket
+# would never be reached and credential stuffing would get the general limit.
+###############################################################################
+
+spring:
+  application:
+    name: api-gateway
+
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  # Reactive Redis, required by the gateway's distributed token-bucket limiter.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      lettuce:
+        pool:
+          # Pooling is switched OFF here, overriding the platform default.
+          #
+          # A Lettuce connection is thread-safe and multiplexes many concurrent
+          # commands over a single TCP connection. The other services enable
+          # pooling because they use the BLOCKING StringRedisTemplate for
+          # distributed locks, where a command holds its connection for the
+          # duration of the call. The gateway is fully reactive and never blocks,
+          # so a pool would add a commons-pool2 dependency and idle sockets for no
+          # throughput benefit.
+          enabled: false
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # Global filters and timeouts applied to every route.
+          httpclient:
+            connect-timeout: 2000
+            # A bounded response timeout is what stops one slow downstream service
+            # from holding gateway connections open until the client gives up.
+            response-timeout: 15s
+
+          # CORS is handled by GatewaySecurityConfig, not here, so there is one
+          # policy rather than two that can disagree.
+
+          default-filters:
+            # Strip hop-by-hop headers a client might try to smuggle through.
+            - RemoveRequestHeader=Cookie
+            - RemoveRequestHeader=Set-Cookie
+
+          routes:
+            # ---------------------------------------------------------------
+            # Aggregated OpenAPI documents.
+            #
+            # Downstream services publish at /v3/api-docs. Dedicated gateway
+            # paths avoid colliding with business routes and rewrite to that
+            # actual downstream contract.
+            # ---------------------------------------------------------------
+            - id: auth-openapi
+              uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+              predicates: [Path=/docs/auth/v3/api-docs]
+              filters: ["RewritePath=/docs/auth/v3/api-docs, /v3/api-docs"]
+            - id: wallet-openapi
+              uri: ${WALLET_SERVICE_URL:http://localhost:8082}
+              predicates: [Path=/docs/wallet/v3/api-docs]
+              filters: ["RewritePath=/docs/wallet/v3/api-docs, /v3/api-docs"]
+            - id: payment-openapi
+              uri: ${PAYMENT_SERVICE_URL:http://localhost:8084}
+              predicates: [Path=/docs/payment/v3/api-docs]
+              filters: ["RewritePath=/docs/payment/v3/api-docs, /v3/api-docs"]
+            - id: ledger-openapi
+              uri: ${LEDGER_SERVICE_URL:http://localhost:8083}
+              predicates: [Path=/docs/ledger/v3/api-docs]
+              filters: ["RewritePath=/docs/ledger/v3/api-docs, /v3/api-docs"]
+            - id: orchestrator-openapi
+              uri: ${ORCHESTRATOR_SERVICE_URL:http://localhost:8085}
+              predicates: [Path=/docs/orchestrator/v3/api-docs]
+              filters: ["RewritePath=/docs/orchestrator/v3/api-docs, /v3/api-docs"]
+            - id: fraud-openapi
+              uri: ${FRAUD_SERVICE_URL:http://localhost:8086}
+              predicates: [Path=/docs/fraud/v3/api-docs]
+              filters: ["RewritePath=/docs/fraud/v3/api-docs, /v3/api-docs"]
+            - id: investigation-openapi
+              uri: ${AI_SERVICE_URL:http://localhost:8087}
+              predicates: [Path=/docs/investigation/v3/api-docs]
+              filters: ["RewritePath=/docs/investigation/v3/api-docs, /v3/api-docs"]
+            - id: notification-openapi
+              uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8088}
+              predicates: [Path=/docs/notification/v3/api-docs]
+              filters: ["RewritePath=/docs/notification/v3/api-docs, /v3/api-docs"]
+            - id: analytics-openapi
+              uri: ${ANALYTICS_SERVICE_URL:http://localhost:8089}
+              predicates: [Path=/docs/analytics/v3/api-docs]
+              filters: ["RewritePath=/docs/analytics/v3/api-docs, /v3/api-docs"]
+
+            # ---------------------------------------------------------------
+            # Auth: login / register / refresh
+            #
+            # Declared FIRST and keyed by IP with a much tighter bucket, because
+            # these are the credential-stuffing targets. 3 requests/second with a
+            # burst of 6 is generous for a human and hostile to a script.
+            # ---------------------------------------------------------------
+            - id: auth-credentials
+              uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/auth/login,/api/auth/register,/api/auth/refresh
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@ipKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${AUTH_RATE_LIMIT_REPLENISH_RATE:3}
+                    redis-rate-limiter.burstCapacity: ${AUTH_RATE_LIMIT_BURST_CAPACITY:6}
+                    redis-rate-limiter.requestedTokens: 1
+
+            # ---------------------------------------------------------------
+            # Auth: everything else (logout, JWKS, user profile, admin users)
+            # ---------------------------------------------------------------
+            - id: auth-service
+              uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/auth/**,/api/users/**,/.well-known/jwks.json
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                    redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+
+            # ---------------------------------------------------------------
+            # Wallets
+            # ---------------------------------------------------------------
+            - id: wallet-service
+              uri: ${WALLET_SERVICE_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/wallets/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                    redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+
+            # ---------------------------------------------------------------
+            # Ledger (read-only for clients; postings are event-driven)
+            # ---------------------------------------------------------------
+            - id: ledger-service
+              uri: ${LEDGER_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/ledger/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                    redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+
+            # ---------------------------------------------------------------
+            # Payments
+            # ---------------------------------------------------------------
+            - id: payment-service
+              uri: ${PAYMENT_SERVICE_URL:http://localhost:8084}
+              predicates:
+                - Path=/api/payments/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                    redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+
+            # ---------------------------------------------------------------
+            # Payment orchestration (staff only)
+            #
+            # Saga state, provider health and routing diagnostics. There is
+            # deliberately no route that starts a payment: orchestration is
+            # triggered by the payment-created event and by nothing else, so
+            # there is exactly one way in and no second path to keep consistent
+            # with it.
+            #
+            # Every handler behind this route carries its own @PreAuthorize, and
+            # that is doing real work rather than duplicating a chain rule: the
+            # shared chain auto-restricts /api/admin/**, and these paths are not
+            # under it. A saga exposes counterparties, amounts and provider
+            # routing for every payment on the platform.
+            #
+            # A lower rate limit than the customer routes. This surface is used
+            # by a handful of operators during an incident, not by traffic, and
+            # its queries are the expensive ones - a saga read assembles the
+            # step log and every provider call.
+            # ---------------------------------------------------------------
+            - id: payment-orchestrator
+              uri: ${ORCHESTRATOR_SERVICE_URL:http://localhost:8085}
+              predicates:
+                - Path=/api/orchestration/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${ADMIN_RATE_LIMIT_REPLENISH_RATE:10}
+                    redis-rate-limiter.burstCapacity: ${ADMIN_RATE_LIMIT_BURST_CAPACITY:20}
+
+            # ---------------------------------------------------------------
+            # Fraud intelligence (staff only)
+            #
+            # Risk verdicts, the analyst alert queue, and decisions on held
+            # payments. There is deliberately no route that sets a score or edits
+            # a verdict: an assessment is a statement about a payment at a moment
+            # in time, and an analyst's disagreement is recorded alongside it
+            # rather than as an edit.
+            #
+            # Every handler behind this route carries its own @PreAuthorize, and
+            # that is load-bearing rather than duplicating a chain rule: the
+            # shared chain auto-restricts /api/admin/**, and these paths are not
+            # under it. Without method security, every customer's risk score,
+            # device fingerprint and coordinates would be readable by any
+            # authenticated user - data the customer never knowingly provided,
+            # which makes it a worse leak than the payment records themselves.
+            #
+            # Admin rate limits, matching the orchestration surface: this is used
+            # by a handful of analysts working a queue, not by traffic, and its
+            # queries are the expensive ones - an assessment detail read assembles
+            # the feature snapshot and every decision on the payment.
+            #
+            # Note what has NO route: ml-service. The model is reachable only from
+            # fraud-service inside the network. Publishing a scoring endpoint would
+            # let anyone map the decision boundary by probing it, which is the one
+            # thing that makes a fraud model cheap to evade.
+            # ---------------------------------------------------------------
+            - id: fraud-service
+              uri: ${FRAUD_SERVICE_URL:http://localhost:8086}
+              predicates:
+                - Path=/api/fraud/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${ADMIN_RATE_LIMIT_REPLENISH_RATE:10}
+                    redis-rate-limiter.burstCapacity: ${ADMIN_RATE_LIMIT_BURST_CAPACITY:20}
+
+            # ---------------------------------------------------------------
+            # AI investigations (analyst-facing)
+            #
+            # Admin rate limits, not customer ones. Every handler behind this
+            # path requires ADMIN or FRAUD_ANALYST, so the traffic is a handful
+            # of analysts working a queue - customer limits here would be sized
+            # for a population that cannot reach the route at all.
+            #
+            # The on-demand POST is the reason this matters rather than being
+            # tidy: it is the only endpoint on the platform where one request
+            # can trigger a paid language-model call. Customer-sized limits
+            # would put a per-analyst budget of 40 model calls a burst behind a
+            # single token.
+            #
+            # Note what has NO route: nothing here can act. The service holds no
+            # credential for any internal write API, so even an authenticated
+            # analyst driving this surface can only cause a report to be
+            # written - moving money needs a separate, attributed decision
+            # recorded in fraud-service.
+            # ---------------------------------------------------------------
+            - id: ai-investigation-service
+              uri: ${AI_SERVICE_URL:http://localhost:8087}
+              predicates:
+                - Path=/api/investigations/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${ADMIN_RATE_LIMIT_REPLENISH_RATE:10}
+                    redis-rate-limiter.burstCapacity: ${ADMIN_RATE_LIMIT_BURST_CAPACITY:20}
+
+            # ---------------------------------------------------------------
+            # Notifications: the customer's own inbox and channel preferences.
+            #
+            # Customer rate limits, because this genuinely is customer traffic -
+            # a client polls the unread badge count. Every endpoint behind it is
+            # scoped to the caller by the token rather than by a path parameter,
+            # so there is no user id for a client to change.
+            # ---------------------------------------------------------------
+            - id: notification-service
+              uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8088}
+              predicates:
+                - Path=/api/notifications/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                    redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+
+            # ---------------------------------------------------------------
+            # Notification administration: the dead-letter queue and replay.
+            #
+            # ORDER IS LOAD-BEARING. Routes are evaluated in declaration order,
+            # and the analytics route below claims all of /api/admin/**. This
+            # entry must stay above it or every request here would be proxied to
+            # analytics-service and answered with a 404 - which would look like a
+            # missing endpoint rather than a misrouted one, and would send
+            # somebody debugging the wrong service.
+            #
+            # Deliberately under /api/admin/** rather than beside the customer
+            # inbox at /api/notifications/**. That prefix is what the shared
+            # security chain and GatewaySecurityConfig both restrict to ADMIN and
+            # FRAUD_ANALYST, so keeping it here means three independent controls
+            # stand in front of a surface that lists which customers were not
+            # reached and can re-send messages to them.
+            #
+            # Admin rate limits, not customer ones: this is a handful of operators
+            # working a queue, and replay triggers real delivery work.
+            # ---------------------------------------------------------------
+            - id: notification-admin
+              uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8088}
+              predicates:
+                - Path=/api/admin/notifications/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${ADMIN_RATE_LIMIT_REPLENISH_RATE:10}
+                    redis-rate-limiter.burstCapacity: ${ADMIN_RATE_LIMIT_BURST_CAPACITY:20}
+
+            # ---------------------------------------------------------------
+            # User administration: search, role grants, disable and re-enable.
+            #
+            # ORDER IS LOAD-BEARING, for the same reason as the route above: the
+            # analytics catch-all claims all of /api/admin/**, so this has to sit
+            # above it.
+            #
+            # These handlers live in auth-service's UserController alongside
+            # /api/users/**, but under the /api/admin/** prefix - which is what
+            # both the shared security chain and GatewaySecurityConfig restrict to
+            # ADMIN and FRAUD_ANALYST. Without this route the requests fell through
+            # to analytics-service and came back 404: an endpoint that plainly
+            # exists, reported as missing, with the 404 logged by a service that
+            # has never heard of it.
+            #
+            # Admin rate limits: a handful of operators, and the write paths here
+            # revoke sessions and change what an account may do.
+            # ---------------------------------------------------------------
+            - id: auth-admin
+              uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/admin/users/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${ADMIN_RATE_LIMIT_REPLENISH_RATE:10}
+                    redis-rate-limiter.burstCapacity: ${ADMIN_RATE_LIMIT_BURST_CAPACITY:20}
+
+            # ---------------------------------------------------------------
+            # Admin analytics
+            #
+            # Authorisation (ADMIN or FRAUD_ANALYST) is enforced in
+            # GatewaySecurityConfig, and again by the service itself. Defence in
+            # depth: the gateway is the first check, not the only one.
+            #
+            # This is a catch-all for /api/admin/**, so any service that owns an
+            # admin sub-path needs a more specific route declared ABOVE it.
+            # Currently: notification-admin and auth-admin, both above.
+            # ---------------------------------------------------------------
+            - id: analytics-service
+              uri: ${ANALYTICS_SERVICE_URL:http://localhost:8089}
+              predicates:
+                - Path=/api/admin/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                    redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+
+            # NOTE: there is deliberately NO route for /internal/**. Those endpoints
+            # exist only for service-to-service calls, and having no route at all is
+            # a stronger guarantee than a route plus an authorisation rule.
+            # GatewaySecurityConfig additionally denies the path outright.
+
+server:
+  port: ${SERVER_PORT:8080}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  # The gateway holds no database and emits no domain events.
+  outbox:
+    enabled: false
+  kafka:
+    bootstrap-servers: ""
+
+  # The gateway forwards the caller's own token; it never needs one of its own.
+  service-auth:
+    enabled: false
+
+  # The shared servlet chain is not applicable to a reactive application; the
+  # gateway defines its own SecurityWebFilterChain.
+  security:
+    standard-chain:
+      enabled: false
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    # Aggregates each service's spec behind one Swagger UI, so the whole platform
+    # API can be browsed from a single page.
+    urls:
+      - name: auth-service
+        url: /docs/auth/v3/api-docs
+      - name: wallet-service
+        url: /docs/wallet/v3/api-docs
+      - name: payment-service
+        url: /docs/payment/v3/api-docs
+      - name: ledger-service
+        url: /docs/ledger/v3/api-docs
+      - name: payment-orchestrator
+        url: /docs/orchestrator/v3/api-docs
+      - name: fraud-service
+        url: /docs/fraud/v3/api-docs
+      - name: ai-investigation-service
+        url: /docs/investigation/v3/api-docs
+      - name: notification-service
+        url: /docs/notification/v3/api-docs
+      - name: analytics-service
+        url: /docs/analytics/v3/api-docs
+

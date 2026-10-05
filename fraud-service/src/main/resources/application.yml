@@ -1,0 +1,184 @@
+###############################################################################
+# fraud-service
+#
+# Fraud risk scoring and alerting. Combines a deterministic rule engine with
+# the Python ML model to produce a calibrated fraud probability, a risk
+# bucket and an APPROVE / REVIEW / HOLD / REJECT decision. If the model
+# is unreachable the verdict falls back to rules and is marked degraded.
+#
+# Hosts and secrets come from the environment. Shared platform defaults are
+# imported from platform-common's aegis-defaults.yml, which this file overrides.
+###############################################################################
+
+spring:
+  application:
+    name: fraud-service
+
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${FRAUD_DB_NAME:aegis_fraud}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    locations: classpath:db/migration
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. validate turns a mapping/schema mismatch into a
+      # startup failure instead of a silent ALTER against a live database.
+      ddl-auto: validate
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys are fetched from the auth service. This service therefore
+          # holds no signing material and cannot mint a token, so compromising it
+          # does not yield the ability to forge identities.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+server:
+  port: ${SERVER_PORT:8086}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  openapi:
+    description: >-
+      Combines a deterministic rule engine with the Python ML model to produce a calibrated fraud probability, a risk bucket and an APPROVE / REVIEW / HOLD / REJECT decision. If the model is unreachable the verdict falls back to rules and is marked degraded.
+
+  # Use the shared deny-by-default resource-server chain from platform-common.
+  security:
+    standard-chain:
+      enabled: true
+
+  # Credentials for outbound service-to-service calls (OAuth2 client credentials).
+  service-auth:
+    enabled: true
+    token-uri: ${AUTH_SERVICE_URL:http://localhost:8081}/api/auth/token
+    client-id: ${INTERNAL_CLIENT_ID:aegis-internal}
+    client-secret: ${INTERNAL_CLIENT_SECRET:}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # A distinct group per service: each one needs its own copy of every event.
+    # Sharing a group id would make services steal each other's partitions.
+    consumer-group-id: fraud-service
+
+  outbox:
+    # This service emits domain events, so it records them to the outbox inside
+    # the business transaction and drains them to Kafka asynchronously.
+    enabled: true
+
+  # Downstream services this one calls.
+  clients:
+    # ml-service is a Python FastAPI application. It authenticates with a static
+    # API key rather than a client-credentials token, because it has no place in
+    # the platform's OAuth2 trust chain — pretending otherwise would be
+    # misleading about how it is actually secured.
+    ml-service-url: ${ML_SERVICE_URL:http://localhost:8000}
+
+  # ------------------------------------------------------------- fraud engine ---
+  #
+  # Thresholds are business decisions and change far more often than the pipeline
+  # does, so they are configuration rather than code: retuning the blocking
+  # threshold should be an environment change reviewed by a fraud team, not a
+  # release.
+  #
+  # The one thing deliberately NOT configurable is ml-service's country risk
+  # list. A geography list that can change without review is a discrimination
+  # exposure, so it lives in reviewed source.
+  fraud:
+    thresholds:
+      # Probabilities, not arbitrary dials — the model is calibrated (isotonic),
+      # and the training run reports the calibration error that makes these
+      # numbers mean what they say. 0.80 reads directly as a risk score of 80.
+      #
+      # Measured on held-out data at 0.80: precision 0.809, recall 0.441, and an
+      # alert rate of 0.94%. The alert rate is the number that decides whether a
+      # threshold is usable: one that flags 10% of traffic is not a fraud control,
+      # it is a manual review department.
+      high-risk: ${FRAUD_HIGH_RISK_THRESHOLD:0.80}
+      # At 0.45: precision 0.804, recall 0.847, alert rate 1.82%. Higher recall,
+      # and affordable only because MEDIUM settles the payment and merely raises
+      # an alert rather than making a customer wait.
+      medium-risk: ${FRAUD_MEDIUM_RISK_THRESHOLD:0.45}
+
+    ml:
+      api-key: ${ML_API_KEY:}
+
+      # Short on purpose. This call is on the payment's critical path, ahead of a
+      # provider authorisation with a three-second budget of its own, so a slow
+      # model eats the saga's headroom. Falling back to rules quickly is better
+      # for the customer than making every payment wait.
+      timeout: ${ML_TIMEOUT:1200ms}
+
+      # Safe to retry, unlike a provider authorisation: scoring is a pure
+      # function with no side effect, so a duplicate call charges nobody and
+      # returns the same answer.
+      max-attempts: ${ML_MAX_ATTEMPTS:2}
+      retry-interval: ${ML_RETRY_INTERVAL:80ms}
+
+      # False by default, and this is the arguable one. Refusing every payment
+      # while the model is down converts a fraud-service outage into a total
+      # payment outage — a far larger incident than the fraud it prevents — and
+      # the deterministic rules cover precisely the archetypes the model scores
+      # worst on. So the default falls back to rules, marks the verdict
+      # degradedMode and alerts. Set true where refusing a payment is cheaper
+      # than missing fraud.
+      reject-when-unavailable: ${FRAUD_REJECT_WHEN_ML_UNAVAILABLE:false}
+
+    rules:
+      velocity-window: ${FRAUD_VELOCITY_WINDOW:24h}
+
+      # Bust-out. These defaults exist because the model's recall on this
+      # archetype was measured at 0.147 — the rule carries the case almost alone.
+      # The conjunction is what makes it usable: exceeding the historic maximum
+      # alone is far too common to act on.
+      bust-out-amount-multiple: ${FRAUD_BUST_OUT_MULTIPLE:1.6}
+      bust-out-minimum-history: ${FRAUD_BUST_OUT_MIN_HISTORY:20}
+
+      # Card testing needs both signals. Failures alone are ordinary (an expiring
+      # card produces them); a burst alone is a customer shopping.
+      card-testing-failures: ${FRAUD_CARD_TESTING_FAILURES:5}
+      card-testing-attempts1h: ${FRAUD_CARD_TESTING_ATTEMPTS:5}
+
+      # Roughly a commercial jet. Above this the two payments cannot both be the
+      # same person travelling. Deliberately not lower: a genuine flight plus an
+      # airport VPN produces surprisingly high figures.
+      impossible-travel-kmh: ${FRAUD_IMPOSSIBLE_TRAVEL_KMH:900.0}
+
+      new-device-amount-multiple: ${FRAUD_NEW_DEVICE_MULTIPLE:5.0}
+
+      dormant-days: ${FRAUD_DORMANT_DAYS:90}
+      dormant-amount-multiple: ${FRAUD_DORMANT_MULTIPLE:3.0}
+
+      # The only automatic rejection in the set rests on a human having already
+      # confirmed fraud on this account three times. That is evidence needing no
+      # further judgement, which is the bar an automatic refusal has to meet — and
+      # it is why CRITICAL/REJECT is unreachable from a probability, however high.
+      confirmed-fraud-review-count: ${FRAUD_CONFIRMED_REVIEW_COUNT:1}
+      confirmed-fraud-block-count: ${FRAUD_CONFIRMED_BLOCK_COUNT:3}
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+

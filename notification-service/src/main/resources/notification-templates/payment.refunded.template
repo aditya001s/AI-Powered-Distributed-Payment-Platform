@@ -1,0 +1,19 @@
+--- SUBJECT ---
+You have been refunded {{amount}} {{currency}}
+
+--- EMAIL ---
+{{greeting?}}
+
+Your payment of {{amount}} {{currency}} has been refunded in full. The money is
+back in your balance.
+
+Reference: {{transactionId}}
+Note: {{description?}}
+
+- AegisPay
+
+--- SMS ---
+AegisPay: your payment of {{amount}} {{currency}} was refunded in full. Ref {{transactionId}}.
+
+--- IN_APP ---
+Your payment of {{amount}} {{currency}} was refunded in full. Reference {{transactionId}}.

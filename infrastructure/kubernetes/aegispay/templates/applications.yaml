@@ -1,0 +1,335 @@
+{{- include "aegispay.validateDeploymentProfile" . }}
+{{- range $name, $service := .Values.services }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegispay.componentName" (list $ $name) }}
+  labels:
+    {{- include "aegispay.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+spec:
+  replicas: {{ $service.replicas }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "aegispay.selectorLabels" (dict "root" $ "name" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aegispay.selectorLabels" (dict "root" $ "name" $name) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        aegispay.io/runtime-secret-version: {{ $.Values.runtimeSecret.version | quote }}
+    spec:
+      serviceAccountName: {{ include "aegispay.serviceAccountName" $ }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or $service.database $service.redis $service.kafka }}
+      initContainers:
+        {{- if $service.database }}
+        - name: wait-for-postgresql
+          image: {{ $.Values.images.busybox }}
+          command: ["sh", "-c", "until nc -z $POSTGRES_HOST $POSTGRES_PORT; do sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: {{ include "aegispay.fullname" $ }}-config }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+        {{- end }}
+        {{- if $service.redis }}
+        - name: wait-for-redis
+          image: {{ $.Values.images.busybox }}
+          command: ["sh", "-c", "until nc -z $REDIS_HOST $REDIS_PORT; do sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: {{ include "aegispay.fullname" $ }}-config }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+        {{- end }}
+        {{- if and $service.kafka $.Values.infrastructure.kafka.enabled }}
+        - name: wait-for-kafka
+          image: {{ $.Values.images.busybox }}
+          command: ["sh", "-c", "host=${KAFKA_BOOTSTRAP_SERVERS%:*}; port=${KAFKA_BOOTSTRAP_SERVERS##*:}; until nc -z $host $port; do sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: {{ include "aegispay.fullname" $ }}-config }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "aegispay.image" (list $ $service.image) }}
+          imagePullPolicy: {{ $.Values.global.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $service.port }}
+              protocol: TCP
+          securityContext:
+            {{- toYaml $.Values.applicationSecurityContext | nindent 12 }}
+            runAsUser: 10001
+            runAsGroup: 10001
+          {{- if eq $service.kind "java" }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "aegispay.fullname" $ }}-config
+          env:
+            - name: SERVER_PORT
+              value: {{ $service.port | quote }}
+            {{- if $service.database }}
+            - name: POSTGRES_USER
+              value: {{ printf "%s_user" $service.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aegispay.runtimeSecret" $ }}
+                  key: {{ printf "%s_PASSWORD" (trimSuffix "_NAME" $service.databaseVariable) }}
+            {{- end }}
+            {{- if and $service.database (not $.Values.infrastructure.postgresql.enabled) }}
+            - name: SPRING_DATASOURCE_HIKARI_DATA_SOURCE_PROPERTIES_SSLMODE
+              value: {{ required "infrastructure.postgresql.sslMode is required for external PostgreSQL" $.Values.infrastructure.postgresql.sslMode | quote }}
+            - name: SPRING_DATASOURCE_HIKARI_DATA_SOURCE_PROPERTIES_SSLROOTCERT
+              value: /var/run/secrets/aegispay/postgres/postgres-ca.crt
+            {{- end }}
+            {{- if $service.redis }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ include "aegispay.runtimeSecret" $ }}, key: REDIS_PASSWORD }
+            {{- if not $.Values.infrastructure.redis.enabled }}
+            - name: SPRING_DATA_REDIS_SSL_ENABLED
+              value: {{ $.Values.infrastructure.redis.sslEnabled | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if and $service.kafka (not $.Values.infrastructure.kafka.enabled) }}
+            - name: SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL
+              value: {{ required "infrastructure.kafka.securityProtocol is required for external Kafka" $.Values.infrastructure.kafka.securityProtocol | quote }}
+            - name: SPRING_KAFKA_PROPERTIES_SASL_MECHANISM
+              value: {{ required "infrastructure.kafka.saslMechanism is required for external Kafka" $.Values.infrastructure.kafka.saslMechanism | quote }}
+            - name: SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aegispay.runtimeSecret" $ }}
+                  key: {{ required "infrastructure.kafka.saslJaasConfigKey is required for external Kafka" $.Values.infrastructure.kafka.saslJaasConfigKey }}
+            {{- if $.Values.infrastructure.kafka.truststoreKey }}
+            - name: SPRING_KAFKA_PROPERTIES_SSL_TRUSTSTORE_LOCATION
+              value: /var/run/secrets/aegispay/kafka/truststore.p12
+            - name: SPRING_KAFKA_PROPERTIES_SSL_TRUSTSTORE_TYPE
+              value: PKCS12
+            - name: SPRING_KAFKA_PROPERTIES_SSL_TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aegispay.runtimeSecret" $ }}
+                  key: {{ $.Values.infrastructure.kafka.truststorePasswordKey }}
+            {{- end }}
+            {{- end }}
+            {{- if $service.serviceAuth }}
+            - name: INTERNAL_CLIENT_ID
+              value: {{ $name | quote }}
+            - name: INTERNAL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aegispay.runtimeSecret" $ }}
+                  key: {{ printf "%s_INTERNAL_CLIENT_SECRET" (upper (replace "-" "_" $name)) }}
+            {{- end }}
+            {{- if eq $name "auth-service" }}
+            {{- range $clientName, $client := $.Values.services }}
+            {{- if $client.serviceAuth }}
+            - name: {{ printf "%s_INTERNAL_CLIENT_ID" (upper (replace "-" "_" $clientName)) }}
+              value: {{ $clientName | quote }}
+            - name: {{ printf "%s_INTERNAL_CLIENT_SECRET" (upper (replace "-" "_" $clientName)) }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aegispay.runtimeSecret" $ }}
+                  key: {{ printf "%s_INTERNAL_CLIENT_SECRET" (upper (replace "-" "_" $clientName)) }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if $service.mlApiKey }}
+            - name: ML_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ include "aegispay.runtimeSecret" $ }}, key: ML_API_KEY }
+            {{- end }}
+            {{- if $service.aiApiKey }}
+            - name: AI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ include "aegispay.runtimeSecret" $ }}, key: AI_API_KEY }
+            {{- end }}
+            {{- if $service.jwtSigningKeys }}
+            - name: JWT_PRIVATE_KEY_LOCATION
+              value: file:/var/run/secrets/aegispay/jwt-private.pem
+            - name: JWT_PUBLIC_KEY_LOCATION
+              value: file:/var/run/secrets/aegispay/jwt-public.pem
+            {{- end }}
+          {{- else if eq $service.kind "ml" }}
+          env:
+            - name: PLATFORM_ENV
+              value: kubernetes
+            - name: LOG_LEVEL
+              value: {{ $.Values.global.logLevel | quote }}
+            - name: ML_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ include "aegispay.runtimeSecret" $ }}, key: ML_API_KEY }
+          {{- else if eq $service.kind "frontend" }}
+          env:
+            - name: API_UPSTREAM
+              value: {{ printf "http://%s:8080" (include "aegispay.componentName" (list $ "api-gateway")) | quote }}
+          {{- end }}
+          resources:
+            {{- toYaml $service.resources | nindent 12 }}
+          {{- if eq $service.kind "java" }}
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- else if eq $service.kind "ml" }}
+          startupProbe:
+            httpGet: { path: /health/readiness, port: http }
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /health/readiness, port: http }
+            periodSeconds: 10
+          {{- else }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if and $service.database (not $.Values.infrastructure.postgresql.enabled) }}
+            - name: postgresql-ca
+              mountPath: /var/run/secrets/aegispay/postgres
+              readOnly: true
+            {{- end }}
+            {{- if and $service.kafka (not $.Values.infrastructure.kafka.enabled) $.Values.infrastructure.kafka.truststoreKey }}
+            - name: kafka-truststore
+              mountPath: /var/run/secrets/aegispay/kafka
+              readOnly: true
+            {{- end }}
+            {{- if eq $service.kind "frontend" }}
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            {{- end }}
+            {{- if $service.jwtSigningKeys }}
+            - name: jwt-keys
+              mountPath: /var/run/secrets/aegispay
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if and $service.database (not $.Values.infrastructure.postgresql.enabled) }}
+        - name: postgresql-ca
+          secret:
+            secretName: {{ include "aegispay.runtimeSecret" $ }}
+            items:
+              - key: {{ required "infrastructure.postgresql.rootCertificateKey is required for external PostgreSQL" $.Values.infrastructure.postgresql.rootCertificateKey }}
+                path: postgres-ca.crt
+        {{- end }}
+        {{- if and $service.kafka (not $.Values.infrastructure.kafka.enabled) $.Values.infrastructure.kafka.truststoreKey }}
+        - name: kafka-truststore
+          secret:
+            secretName: {{ include "aegispay.runtimeSecret" $ }}
+            items:
+              - key: {{ $.Values.infrastructure.kafka.truststoreKey }}
+                path: truststore.p12
+        {{- end }}
+        {{- if eq $service.kind "frontend" }}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        {{- end }}
+        {{- if $service.jwtSigningKeys }}
+        - name: jwt-keys
+          secret:
+            secretName: {{ include "aegispay.runtimeSecret" $ }}
+            items:
+              - { key: jwt-private.pem, path: jwt-private.pem }
+              - { key: jwt-public.pem, path: jwt-public.pem }
+        {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "aegispay.selectorLabels" (dict "root" $ "name" $name) | nindent 14 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aegispay.componentName" (list $ $name) }}
+  labels:
+    {{- include "aegispay.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+  {{- if or (eq $service.kind "java") (eq $service.kind "ml") }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: {{ ternary "/actuator/prometheus" "/metrics" (eq $service.kind "java") | quote }}
+    prometheus.io/port: {{ $service.port | quote }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "aegispay.selectorLabels" (dict "root" $ "name" $name) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $service.port }}
+      targetPort: http
+      protocol: TCP
+{{- if and $.Values.podDisruptionBudget.enabled (gt (int $service.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "aegispay.componentName" (list $ $name) }}
+  labels:
+    {{- include "aegispay.labels" $ | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "aegispay.selectorLabels" (dict "root" $ "name" $name) | nindent 6 }}
+{{- end }}
+---
+{{- end }}

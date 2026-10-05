@@ -1,0 +1,195 @@
+###############################################################################
+# ai-investigation-service
+#
+# RAG-based fraud investigation narratives. Retrieves relevant fraud-policy
+# documents from a vector store and generates a grounded, cited explanation
+# of why a transaction was flagged, plus an analyst recommendation.
+# Authority boundary: this service can only RECOMMEND. It holds no
+# credentials for any wallet or ledger write API, so it structurally cannot
+# move money or block an account.
+#
+# Hosts and secrets come from the environment. Shared platform defaults are
+# imported from platform-common's aegis-defaults.yml, which this file overrides.
+###############################################################################
+
+spring:
+  application:
+    name: ai-investigation-service
+
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${AI_DB_NAME:aegis_ai}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    locations: classpath:db/migration
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. validate turns a mapping/schema mismatch into a
+      # startup failure instead of a silent ALTER against a live database.
+      ddl-auto: validate
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys are fetched from the auth service. This service therefore
+          # holds no signing material and cannot mint a token, so compromising it
+          # does not yield the ability to forge identities.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+server:
+  port: ${SERVER_PORT:8087}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  openapi:
+    description: >-
+      Retrieves relevant fraud-policy documents from a vector store and generates a grounded, cited explanation of why a transaction was flagged, plus an analyst recommendation. Authority boundary: this service can only RECOMMEND. It holds no credentials for any wallet or ledger write API, so it structurally cannot move money or block an account.
+
+  # Use the shared deny-by-default resource-server chain from platform-common.
+  security:
+    standard-chain:
+      enabled: true
+
+  # ---------------------------------------------------------------------------
+  # NO service-to-service credentials. This is the authority boundary, enforced
+  # structurally rather than by convention.
+  #
+  # An investigation recommends; a person decides. With service-auth disabled this
+  # service holds no credential that ANY internal write API would accept, so it
+  # cannot move money, refuse a payment or restrict an account even if a future
+  # handler tried to. Naming a recommendation carefully is a convention; having no
+  # credentials is a guarantee.
+  #
+  # It also means the service cannot fetch evidence. That is why the evidence pack
+  # is assembled entirely from the investigation-requested event, and why the
+  # on-demand endpoint requires the caller to supply what they are asking about.
+  # ---------------------------------------------------------------------------
+  service-auth:
+    enabled: false
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # A distinct group per service: each one needs its own copy of every event.
+    # Sharing a group id would make services steal each other's partitions.
+    consumer-group-id: ai-investigation-service
+
+  outbox:
+    # Emits investigation-completed. Recorded to the outbox inside the same
+    # transaction as the report, so "the report exists" and "the world was told"
+    # are one commit rather than two things that can disagree after a crash.
+    enabled: true
+
+  # ------------------------------------------------------------ investigation ---
+  ai:
+    retrieval:
+      # How many chunks vector search contributes. Small deliberately: every
+      # retrieved chunk costs prompt budget, and a long tail of weak matches does
+      # more harm than good - a model given eight loosely-relevant policies will
+      # find a way to cite all eight, and a narrative citing everything has cited
+      # nothing.
+      top-k: ${RAG_TOP_K:5}
+
+      # THE most consequential number in this service. An approximate
+      # nearest-neighbour search always returns its k nearest neighbours however
+      # far away they are, so without a floor a payment with no relevant policy
+      # retrieves the five least-irrelevant documents and the narrative cites them
+      # as though they mattered. The floor is what makes "no policy matched" an
+      # expressible outcome.
+      #
+      # 0.28 is tuned for the default LEXICAL embedder, where an on-topic passage
+      # scores roughly 0.35-0.7 and an unrelated one below 0.15. A semantic
+      # embedder has a much narrower and higher distribution and would need this
+      # retuned - which is why the embedder id is recorded on every report.
+      minimum-similarity: ${RAG_MINIMUM_SIMILARITY:0.28}
+
+      # Policies declared against a fired rule are always included. This is what
+      # makes retrieval reliable rather than merely plausible: vector search finds
+      # policy that RESEMBLES the payment, while the author-declared mapping finds
+      # the policy that DEFINES the rule that actually fired. Trusting an embedder
+      # to have learned that RULE_BUST_OUT_PATTERN means the same thing as a
+      # paragraph about accounts emptying themselves is a lot to hope for.
+      always-include-rule-policies: ${RAG_ALWAYS_INCLUDE_RULE_POLICIES:true}
+
+      # Separate from the model's context limit: the evidence pack, the
+      # instructions and the expected output all need room too. A retrieval set
+      # that filled the window would push the instructions out, which is how a
+      # model starts ignoring the output format it was told to use.
+      context-token-budget: ${RAG_CONTEXT_TOKEN_BUDGET:2000}
+
+    generation:
+      # local by default, so the platform runs end to end with no API key and no
+      # outbound network access. NOT a placeholder: the offline composer writes a
+      # real report from the evidence and the retrieved policy. What it does not do
+      # is interpret beyond them, and every report it writes is flagged
+      # deterministicFallback so an analyst knows which they are reading.
+      provider: ${AI_PROVIDER:local}
+      model: ${AI_MODEL:gpt-4o-mini}
+      api-key: ${AI_API_KEY:}
+      # Overridable so an OpenAI-compatible gateway or a self-hosted model can be
+      # used - which is how a deployment that will not send payment data to a third
+      # party can still use a language model.
+      api-base-url: ${AI_API_BASE_URL:}
+
+      # Generous compared to the rest of the platform, because this is NOT on the
+      # payment's critical path: an investigation happens after fraud-service has
+      # already decided, so a slow model delays an analyst's reading rather than a
+      # customer's payment. Still bounded, or a hung call holds a consumer thread.
+      timeout: ${AI_REQUEST_TIMEOUT:20s}
+      max-attempts: ${AI_MAX_ATTEMPTS:2}
+      max-output-tokens: ${AI_MAX_OUTPUT_TOKENS:800}
+      # Near zero: this is evidence summarisation, not a creative task, and two
+      # analysts reading the same investigation should see the same words. It
+      # cannot be made fully reproducible - hosted models are not deterministic
+      # even at 0 - which is one more reason the offline composer exists.
+      temperature: ${AI_TEMPERATURE:0.1}
+
+      # A failed hosted generation falls back to the offline composer. An
+      # investigation is advisory, so a labelled degraded report an analyst can
+      # still read beats dead-lettering the request and leaving the payment
+      # quietly uninvestigated.
+      fallback-to-local: ${AI_FALLBACK_TO_LOCAL:true}
+
+      # Injection defence, and a blunt one on purpose. A payment description is the
+      # obvious vector for "ignore previous instructions". The closed
+      # recommendation vocabulary means a successful injection cannot produce an
+      # action, but it can still consume the context window and derail the
+      # narrative, so length is capped hard.
+      max-untrusted-field-length: ${AI_MAX_UNTRUSTED_FIELD_LENGTH:240}
+
+    knowledge-base:
+      # A service that came up with an empty corpus would answer every
+      # investigation ungrounded and report no error, which is the worst kind of
+      # broken. Seeding failure prevents startup.
+      seed-on-startup: ${RAG_SEED_ON_STARTUP:true}
+      # Compares version numbers rather than body text, so editing a policy and
+      # bumping its version takes effect while a whitespace change does not
+      # re-embed the whole corpus.
+      upgrade-existing-documents: ${RAG_UPGRADE_DOCUMENTS:true}
+
+      chunk-target-tokens: ${RAG_CHUNK_TARGET_TOKENS:180}
+      chunk-max-tokens: ${RAG_CHUNK_MAX_TOKENS:300}
+      # Non-zero so a claim spanning a paragraph break is retrievable from either
+      # side. Zero overlap makes every boundary a place where a policy sentence
+      # becomes unreachable by the query that should have found it.
+      chunk-overlap-tokens: ${RAG_CHUNK_OVERLAP_TOKENS:30}
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+

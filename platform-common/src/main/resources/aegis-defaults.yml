@@ -1,0 +1,309 @@
+###############################################################################
+# Shared configuration defaults for every AegisPay JVM service.
+#
+# Imported by each service's application.yml:
+#     spring.config.import: "classpath:aegis-defaults.yml"
+#
+# ---------------------------------------------------------------------------
+# PRECEDENCE - read this before adding a key
+# ---------------------------------------------------------------------------
+# An IMPORTED document takes precedence OVER the file that imported it. Spring
+# Boot inserts the imported document after the importing one, and later documents
+# win. That is the opposite of most people's intuition about a "defaults" file.
+#
+# Consequence: a key placed here CANNOT be overridden by a service's own
+# application.yml. It will silently win, and the service's value will be ignored.
+#
+# Therefore this file contains ONLY settings that are genuinely global and that no
+# service needs to vary. Anything a service must control is deliberately absent
+# and declared in that service's own application.yml instead:
+#
+#   * spring.datasource.*                  (per-service database)
+#   * spring.data.redis.host/port/password (not every service uses Redis)
+#   * spring.data.redis.lettuce.pool.*     (pooling is driven by whether the
+#                                           service declares commons-pool2, so
+#                                           Boot's own default is correct)
+#   * aegis.kafka.bootstrap-servers        (auth-service and the gateway use no broker)
+#   * aegis.kafka.consumer-group-id        (must be unique per service)
+#   * aegis.outbox.enabled                 (only event-emitting services)
+#   * aegis.service-auth.*                 (the token issuer must not call itself)
+#   * aegis.security.standard-chain.enabled(auth-service and the gateway define
+#                                           their own security chains)
+#   * server.port
+#
+# Kept as properties rather than @Bean customisers on purpose: Spring Boot 4
+# repackaged its autoconfiguration classes, and property keys are a far more
+# stable contract than internal Java packages.
+###############################################################################
+
+spring:
+  # ---------------------------------------------------------------------------
+  # Jackson.
+  #
+  # Spring Boot 4 / Spring Framework 7 use Jackson 3, whose ObjectMapper lives in
+  # `tools.jackson.databind` (not `com.fasterxml.jackson.databind`) and which
+  # reorganised its feature enums. Date/time toggles moved out of
+  # SerializationFeature into DateTimeFeature, hence the `datatype.datetime` key
+  # below rather than the Jackson 2 `serialization.write-dates-as-timestamps`.
+  #
+  # Both values below already match Jackson 3's own defaults. They are set
+  # explicitly anyway: these two behaviours are load-bearing for this platform, and
+  # relying on an upstream default that could change in a future minor release is
+  # not worth the two lines saved.
+  # ---------------------------------------------------------------------------
+  jackson:
+    datatype:
+      datetime:
+        # ISO-8601 strings, not epoch numbers. Readable in a Kafka dump, and
+        # unambiguous for the Python ML service that consumes the same shapes.
+        write-dates-as-timestamps: false
+    serialization:
+      fail-on-empty-beans: false
+    deserialization:
+      # Tolerating unknown fields is what makes additive schema evolution safe:
+      # a producer can ship a new field before its consumers are redeployed.
+      fail-on-unknown-properties: false
+    default-property-inclusion: non_null
+
+  # Fail fast on a typo in a property name instead of silently ignoring it.
+  main:
+    banner-mode: "off"
+
+  threads:
+    virtual:
+      # Java 25 virtual threads. Request handling here is dominated by waiting on
+      # the database, Kafka and downstream HTTP, which is exactly the workload
+      # virtual threads improve: no platform thread is parked while blocked.
+      enabled: true
+
+  jpa:
+    open-in-view: false   # never leave a transaction open across view rendering
+    hibernate:
+      ddl-auto: validate  # Flyway owns the schema; Hibernate only verifies it
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 25
+          # Postgres-friendly: batch inserts without needing generated keys back
+          # one row at a time.
+          time_zone: UTC
+        order_inserts: true
+        order_updates: true
+        query:
+          in_clause_parameter_padding: true
+        # Reject implicit lazy loading outside a session rather than emitting an
+        # N+1 storm at runtime.
+        enable_lazy_load_no_trans: false
+
+  datasource:
+    hikari:
+      # Small pools on purpose. A connection pool larger than the database can
+      # serve does not add throughput, it converts a fast failure into a slow
+      # queue. Sized against Postgres max_connections across all services.
+      maximum-pool-size: 12
+      minimum-idle: 2
+      connection-timeout: 3000      # fail fast rather than pile up requests
+      validation-timeout: 2000
+      idle-timeout: 300000
+      max-lifetime: 900000
+      # Detect a connection leak long before the pool is exhausted.
+      leak-detection-threshold: 20000
+      auto-commit: false
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    # Refuse to start if a previously applied migration file was edited. Silent
+    # schema drift between environments is far worse than a failed deploy.
+    validate-on-migrate: true
+    out-of-order: false
+    clean-disabled: true            # `flyway clean` must never be reachable
+
+  data:
+    redis:
+      # Timeouts only. Host, port, password and pooling are per-service.
+      #
+      # Pooling is intentionally NOT configured here. Spring Boot enables the
+      # Lettuce pool exactly when commons-pool2 is on the classpath, which is the
+      # right signal: the six services that take distributed locks through the
+      # BLOCKING StringRedisTemplate declare commons-pool2 and get a pool, while
+      # the fully reactive gateway does not declare it and correctly gets a single
+      # multiplexed connection instead.
+      timeout: 2000ms
+      connect-timeout: 2000ms
+
+  kafka:
+    # Left unset deliberately. All broker configuration is bound to aegis.kafka.*
+    # and the factories are built explicitly in KafkaConfig.
+    listener:
+      missing-topics-fatal: false
+
+server:
+  # Return our ApiError body for container-level errors too, instead of the
+  # default Whitelabel page which leaks the servlet stack.
+  error:
+    whitelabel:
+      enabled: false
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+  shutdown: graceful               # drain in-flight requests on SIGTERM
+  compression:
+    enabled: true
+    mime-types: application/json,application/problem+json
+  tomcat:
+    threads:
+      max: 200
+    # Cap request size; a payment request is small and an unbounded body is a
+    # cheap denial-of-service vector.
+    max-http-form-post-size: 256KB
+    max-swallow-size: 256KB
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Only what monitoring and orchestration need. env/beans/configprops are
+        # excluded because they expose configuration values.
+        include: health,info,prometheus,metrics
+      base-path: /actuator
+  endpoint:
+    health:
+      probes:
+        enabled: true              # /health/readiness and /health/liveness
+      show-details: never          # component details can name internal hosts
+
+      # The ten services are heterogeneous: the gateway has no database, ledger
+      # and ai services have no Redis. Group validation is therefore disabled so
+      # a group may list a contributor a given service does not have, and that
+      # contributor is simply skipped instead of failing startup with
+      # "Included health contributor 'db' in group 'readiness' does not exist".
+      #
+      # The alternative — defining the groups per service — is not available,
+      # because an imported document wins over the importing file (see the note at
+      # the top), so a per-service group definition could not take effect.
+      validate-group-membership: false
+
+      group:
+        readiness:
+          # Readiness gates traffic. It includes the dependencies a request
+          # actually needs, so a pod whose database is unreachable is pulled out
+          # of the load balancer instead of serving errors.
+          include: readinessState,db,redis
+        liveness:
+          # Liveness deliberately excludes every dependency. A liveness probe that
+          # checked Redis would restart every pod in the platform during a Redis
+          # outage - turning a degraded cache into a total outage. Liveness answers
+          # only "is this JVM still functioning".
+          include: livenessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # Publish real percentiles for latency SLOs rather than only a mean.
+      percentiles-histogram:
+        http.server.requests: true
+        aegis.payment.latency: true
+        aegis.fraud.decision.latency: true
+        aegis.provider.call.latency: true
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+        aegis.payment.latency: 0.5,0.95,0.99
+      slo:
+        http.server.requests: 50ms,100ms,250ms,500ms,1s,2s
+  tracing:
+    sampling:
+      # 100% locally so every request is traceable while developing. Lower this
+      # in production (see the K8s ConfigMap) where volume makes it expensive.
+      probability: ${MANAGEMENT_TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://otel-collector:4318}/v1/traces
+  observations:
+    key-values:
+      application: ${spring.application.name}
+
+# ----------------------------------------------------------------- platform ---
+aegis:
+  logging:
+    json: ${LOG_JSON:true}
+    level: ${LOG_LEVEL:INFO}
+
+  # bootstrap-servers and consumer-group-id are per-service and declared there.
+  # Everything below is shared broker behaviour that no service varies.
+  kafka:
+    auto-offset-reset: ${KAFKA_CONSUMER_AUTO_OFFSET_RESET:earliest}
+    concurrency: 2
+    topic-partitions: 6
+    topic-replication-factor: 1
+    provision-topics: true
+    retry:
+      max-attempts: ${KAFKA_RETRY_MAX_ATTEMPTS:4}
+      initial-interval: ${KAFKA_RETRY_INITIAL_INTERVAL_MS:500}ms
+      multiplier: ${KAFKA_RETRY_MULTIPLIER:2.0}
+      max-interval: ${KAFKA_RETRY_MAX_INTERVAL_MS:10000}ms
+    producer:
+      acks: all
+      idempotence: true
+
+  # `enabled` is per-service (only event-emitting services drain an outbox) and is
+  # declared there. These are the shared drain mechanics.
+  outbox:
+    poll-interval: 200ms
+    batch-size: 100
+    max-attempts: 8
+
+  # aegis.service-auth.* is per-service: auth-service issues tokens and must not
+  # try to obtain one from itself, and the gateway forwards the caller's token
+  # rather than using its own identity.
+
+  resilience:
+    circuit-breaker:
+      failure-rate-threshold: ${CB_FAILURE_RATE_THRESHOLD:50}
+      slow-call-rate-threshold: ${CB_SLOW_CALL_RATE_THRESHOLD:60}
+      slow-call-duration-threshold: ${CB_SLOW_CALL_DURATION_MS:1500}ms
+      sliding-window-size: ${CB_SLIDING_WINDOW_SIZE:20}
+      minimum-number-of-calls: ${CB_MINIMUM_NUMBER_OF_CALLS:8}
+      wait-duration-in-open-state: ${CB_WAIT_DURATION_IN_OPEN_STATE_MS:15000}ms
+      permitted-number-of-calls-in-half-open-state: ${CB_PERMITTED_CALLS_IN_HALF_OPEN:4}
+    retry:
+      max-attempts: 3
+      initial-interval: 200ms
+      multiplier: 2.0
+      jitter-factor: 0.3
+    time-limiter:
+      timeout: 3s
+
+---
+###############################################################################
+# Local development profile: SPRING_PROFILES_ACTIVE=local
+#
+# Defined HERE rather than in each service's application.yml, for the precedence
+# reason documented at the top of this file: a service-level profile document
+# cannot override a key set in an imported document. Putting it here means one
+# definition applies to all ten services, and it actually takes effect.
+#
+# Switches logging from JSON to the readable console appender (logback-spring.xml
+# selects the appender on this profile) and raises platform log level to DEBUG.
+###############################################################################
+spring:
+  config:
+    activate:
+      on-profile: local
+
+aegis:
+  logging:
+    json: false
+    level: DEBUG
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Wider exposure locally so `configprops` and `env` can be used to debug
+        # exactly this kind of property-precedence question. Never enabled outside
+        # local: both endpoints reveal configuration values.
+        include: health,info,prometheus,metrics,configprops,env,conditions,mappings
+  endpoint:
+    health:
+      show-details: always

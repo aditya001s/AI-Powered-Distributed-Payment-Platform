@@ -1,0 +1,91 @@
+# ---- Build tooling (local only) ----
+.tools/
+
+# ---- Java / Maven ----
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/.gradle-enterprise/
+*.class
+*.jar
+!**/maven-wrapper.jar
+*.war
+*.ear
+hs_err_pid*
+replay_pid*
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+!.vscode/extensions.json
+.settings/
+.classpath
+.project
+nbproject/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# ML artefacts: keep the directory + metadata, ignore large binaries
+ml-service/models/*.pkl
+ml-service/models/*.joblib
+ml-service/models/*.txt
+ml-service/models/*.bin
+ml-service/data/*.csv
+ml-service/data/*.parquet
+
+# ---- Node / frontend ----
+node_modules/
+dist/
+dist-ssr/
+build/
+.eslintcache
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Secrets & local config ----
+.env
+.env.*
+!.env.example
+*.pem
+!infrastructure/kubernetes/**/*.template.yaml
+secrets/
+*.key
+*.p12
+*.jks
+
+# ---- Runtime data / logs ----
+logs/
+*.log
+docker-volumes/
+pgdata/
+kafka-data/
+redis-data/
+grafana-data/
+prometheus-data/
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Generated panel-demo state ----
+.panel-demo.json
+.panel-verification.json

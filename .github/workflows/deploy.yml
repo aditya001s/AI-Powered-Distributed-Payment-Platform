@@ -1,0 +1,144 @@
+name: Deploy with Helm
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Protected GitHub Environment and deployment target
+        required: true
+        type: choice
+        options: [development, staging, production]
+      image_tag:
+        description: Full 40-character commit SHA published by the image workflow
+        required: true
+        type: string
+      image_registry:
+        description: OCI registry hostname
+        required: true
+        default: ghcr.io
+        type: string
+      image_namespace:
+        description: OCI image namespace
+        required: true
+        type: string
+      confirm:
+        description: Type DEPLOY to confirm an atomic Helm upgrade
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: inputs.confirm == 'DEPLOY'
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Validate immutable coordinates and deployment identifiers
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_REGISTRY: ${{ inputs.image_registry }}
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+          HELM_RELEASE: ${{ vars.HELM_RELEASE }}
+          RUNTIME_SECRET_NAME: ${{ vars.RUNTIME_SECRET_NAME }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]] || { echo "image_tag must be a full lowercase commit SHA" >&2; exit 1; }
+          [[ "$IMAGE_REGISTRY" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$ ]] || { echo "invalid image_registry" >&2; exit 1; }
+          [[ "$IMAGE_NAMESPACE" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]] || { echo "invalid image_namespace" >&2; exit 1; }
+          [[ "$KUBE_NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo "invalid KUBE_NAMESPACE" >&2; exit 1; }
+          [[ "$HELM_RELEASE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo "invalid HELM_RELEASE" >&2; exit 1; }
+          [[ "$RUNTIME_SECRET_NAME" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || { echo "invalid RUNTIME_SECRET_NAME" >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.36.1
+      - name: Install protected environment values
+        shell: bash
+        env:
+          HELM_VALUES_B64: ${{ secrets.HELM_VALUES_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$HELM_VALUES_B64"
+          echo "$HELM_VALUES_B64" | base64 --decode > "$RUNNER_TEMP/environment-values.yaml"
+          chmod 600 "$RUNNER_TEMP/environment-values.yaml"
+          echo "HELM_VALUES_FILE=$RUNNER_TEMP/environment-values.yaml" >> "$GITHUB_ENV"
+      - name: Render and enforce deployment policy
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_REGISTRY: ${{ inputs.image_registry }}
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          RUNTIME_SECRET_NAME: ${{ vars.RUNTIME_SECRET_NAME }}
+        run: |
+          set -euo pipefail
+          helm template policy-check infrastructure/kubernetes/aegispay \
+            -f "$HELM_VALUES_FILE" \
+            --set-string global.image.registry="$IMAGE_REGISTRY" \
+            --set-string global.image.namespace="$IMAGE_NAMESPACE" \
+            --set-string global.image.tag="$IMAGE_TAG" \
+            --set-string global.deploymentProfile="$TARGET_ENVIRONMENT" \
+            --set-string runtimeSecret.existingSecret="$RUNTIME_SECRET_NAME" \
+            > "$RUNNER_TEMP/rendered.yaml"
+          if [[ "$TARGET_ENVIRONMENT" == "production" ]]; then
+            ! grep -q '^kind: StatefulSet$' "$RUNNER_TEMP/rendered.yaml" || { echo "production must use managed PostgreSQL, Redis, and Kafka" >&2; exit 1; }
+            grep -q '^kind: Ingress$' "$RUNNER_TEMP/rendered.yaml" || { echo "production must enable Ingress" >&2; exit 1; }
+            ! grep -q 'aegispay\.example' "$RUNNER_TEMP/rendered.yaml" || { echo "production contains example public endpoints" >&2; exit 1; }
+          fi
+      - name: Install least-privilege kubeconfig
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBECONFIG_B64"
+          echo "$KUBECONFIG_B64" | base64 --decode > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+      - name: Verify deployment authority
+        shell: bash
+        env:
+          KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+        run: |
+          kubectl auth can-i get deployments -n "$KUBE_NAMESPACE"
+          kubectl auth can-i patch deployments -n "$KUBE_NAMESPACE"
+      - name: Atomic deployment
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_REGISTRY: ${{ inputs.image_registry }}
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+          HELM_RELEASE: ${{ vars.HELM_RELEASE }}
+          RUNTIME_SECRET_NAME: ${{ vars.RUNTIME_SECRET_NAME }}
+        run: |
+          helm upgrade --install "$HELM_RELEASE" infrastructure/kubernetes/aegispay \
+            --namespace "$KUBE_NAMESPACE" --create-namespace \
+            -f "$HELM_VALUES_FILE" \
+            --set-string global.image.registry="$IMAGE_REGISTRY" \
+            --set-string global.image.namespace="$IMAGE_NAMESPACE" \
+            --set-string global.image.tag="$IMAGE_TAG" \
+            --set-string global.deploymentProfile="$TARGET_ENVIRONMENT" \
+            --set-string runtimeSecret.existingSecret="$RUNTIME_SECRET_NAME" \
+            --atomic --wait --timeout 15m
+      - name: Show rollout state
+        if: always()
+        shell: bash
+        env:
+          KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+        run: kubectl get deployments,statefulsets,pods -n "$KUBE_NAMESPACE" -o wide

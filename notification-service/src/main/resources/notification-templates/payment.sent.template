@@ -1,0 +1,21 @@
+--- SUBJECT ---
+You sent {{amount}} {{currency}}
+
+--- EMAIL ---
+{{greeting?}}
+
+You sent {{amount}} {{currency}}.
+
+Reference: {{transactionId}}
+Note: {{description?}}
+
+If you did not make this payment, change your password and contact support
+straight away. We will never ask you for your password or a one-time code.
+
+- AegisPay
+
+--- SMS ---
+AegisPay: you sent {{amount}} {{currency}}. Ref {{transactionId}}. Not you? Contact support.
+
+--- IN_APP ---
+You sent {{amount}} {{currency}}. Reference {{transactionId}}.

@@ -1,0 +1,181 @@
+###############################################################################
+# notification-service
+#
+# Multi-channel customer notifications. Consumes payment and fraud events
+# and renders them into email, SMS, push and in-app messages. Delivery is
+# de-duplicated on a notification key, so Kafka's at-least-once delivery
+# cannot produce two 'payment successful' messages for one payment.
+#
+# Hosts and secrets come from the environment. Shared platform defaults are
+# imported from platform-common's aegis-defaults.yml, which this file overrides.
+###############################################################################
+
+spring:
+  application:
+    name: notification-service
+
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${NOTIFICATION_DB_NAME:aegis_notification}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    locations: classpath:db/migration
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. validate turns a mapping/schema mismatch into a
+      # startup failure instead of a silent ALTER against a live database.
+      ddl-auto: validate
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys are fetched from the auth service. This service therefore
+          # holds no signing material and cannot mint a token, so compromising it
+          # does not yield the ability to forge identities.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+server:
+  port: ${SERVER_PORT:8088}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  openapi:
+    description: >-
+      Consumes payment and fraud events and renders them into email, SMS, push and in-app messages. Delivery is de-duplicated on a notification key, so Kafka's at-least-once delivery cannot produce two 'payment successful' messages for one payment.
+
+  # Use the shared deny-by-default resource-server chain from platform-common.
+  security:
+    standard-chain:
+      enabled: true
+
+  # Credentials for outbound service-to-service calls (OAuth2 client credentials).
+  service-auth:
+    enabled: true
+    token-uri: ${AUTH_SERVICE_URL:http://localhost:8081}/api/auth/token
+    client-id: ${INTERNAL_CLIENT_ID:aegis-internal}
+    client-secret: ${INTERNAL_CLIENT_SECRET:}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # A distinct group per service: each one needs its own copy of every event.
+    # Sharing a group id would make services steal each other's partitions.
+    consumer-group-id: notification-service
+
+  outbox:
+    # This service emits no domain events of its own.
+    enabled: false
+
+  clients:
+    # Delivery addresses are resolved from the user directory rather than copied
+    # into this database. An email address is an identity attribute owned by
+    # auth-service, so a customer who changes it starts receiving notifications at
+    # the new one on the next message rather than whenever somebody synchronises.
+    auth-service-url: ${AUTH_SERVICE_URL:http://localhost:8081}
+
+  # ------------------------------------------------------------- notifications
+  notification:
+    retry:
+      # Delivery retry, which is DELIBERATELY SEPARATE from aegis.kafka.retry.*.
+      #
+      # A Kafka retry is for a record that could not be PROCESSED: it blocks the
+      # partition and re-runs the whole handler, so it is short and narrow. A
+      # delivery retry is for a message that could not be SENT, and must not use
+      # the Kafka path at all - backing off a partition because one SMTP host is
+      # slow would stop every later notification to every other customer, and a
+      # redelivery would re-attempt the channels that already succeeded.
+      #
+      # So a send failure is committed as state and drained from the database by a
+      # scheduled worker. The Kafka offset advances, because the event HAS been
+      # processed: the durable record of what must be sent now exists.
+      poll-interval: ${NOTIFICATION_RETRY_POLL_INTERVAL:5s}
+      # Non-zero so a pod that is still opening connection pools is not handed a
+      # batch of transport calls, and so a rolling restart does not have every
+      # instance sweep in the same instant.
+      initial-delay: ${NOTIFICATION_RETRY_INITIAL_DELAY:15s}
+
+      # Bounded because the claim happens inside a transaction. An unbounded sweep
+      # would hold a database connection open across thousands of transport calls,
+      # which is the same mistake as an HTTP call inside a transaction.
+      batch-size: ${NOTIFICATION_RETRY_BATCH_SIZE:50}
+
+      # Total attempts including the first. Eight with the backoff below spans
+      # roughly half an hour: long enough to ride out a provider restart, short
+      # enough that a genuinely broken destination reaches the dead-letter queue
+      # while somebody is still on shift.
+      max-attempts: ${NOTIFICATION_MAX_ATTEMPTS:8}
+      initial-backoff: ${NOTIFICATION_INITIAL_BACKOFF:30s}
+      backoff-multiplier: ${NOTIFICATION_BACKOFF_MULTIPLIER:2.0}
+      # Without a ceiling the eighth attempt would be over an hour after the
+      # seventh, and a notification about a payment is worth less the later it
+      # arrives.
+      max-backoff: ${NOTIFICATION_MAX_BACKOFF:10m}
+
+      # Every instance sweeps on the same interval and a provider outage fails
+      # every delivery at once. Without jitter the whole backlog comes due in the
+      # same second and re-overloads the provider that just recovered, then fails
+      # together again in lockstep until the attempts run out.
+      jitter: ${NOTIFICATION_RETRY_JITTER:0.25}
+
+      # Extra attempts an operator's replay is granted. Granted rather than reset:
+      # a full reset would let a permanently broken destination be replayed
+      # forever, each replay looking like a fresh start.
+      replay-attempt-grant: ${NOTIFICATION_REPLAY_ATTEMPT_GRANT:3}
+
+    transports:
+      # SIMULATED. No SMTP relay and no SMS gateway is contacted, exactly as no
+      # real bank, card network or UPI switch is. What is NOT simulated is
+      # everything around the send: rendering, escaping, per-channel idempotency,
+      # the retry schedule, the dead-letter queue and the audit trail all behave
+      # identically either way, because they sit above the transport interface.
+      email-enabled: ${NOTIFICATION_EMAIL_ENABLED:true}
+      sms-enabled: ${NOTIFICATION_SMS_ENABLED:true}
+
+      # Zero by default. A default that injected failures would make every local
+      # run produce dead letters and teach everyone to ignore the queue. Raised in
+      # tests, where a deliberate failure is the point - a dead-letter mechanism
+      # that is only exercised by a real outage is one nobody has seen work.
+      simulated-failure-rate: ${NOTIFICATION_SIMULATED_FAILURE_RATE:0.0}
+      simulated-latency: ${NOTIFICATION_SIMULATED_LATENCY:0ms}
+
+      email-from-address: ${NOTIFICATION_EMAIL_FROM:no-reply@aegispay.local}
+      email-from-name: ${NOTIFICATION_EMAIL_FROM_NAME:AegisPay}
+      sms-sender-id: ${NOTIFICATION_SMS_SENDER_ID:AEGISPAY}
+
+    recipients:
+      # Short, because this lookup sits between an event arriving and a durable
+      # write. A slow identity service must not hold a Kafka consumer thread: the
+      # notification can be retried, so failing fast is strictly better than
+      # waiting.
+      lookup-timeout: ${NOTIFICATION_LOOKUP_TIMEOUT:2s}
+      # Caching is an honest trade: a customer who changes their email keeps
+      # receiving notifications at the old address for up to this long. Ten minutes
+      # puts that window inside one support call rather than one billing cycle.
+      cache-ttl: ${NOTIFICATION_CONTACT_CACHE_TTL:10m}
+      cache-max-entries: ${NOTIFICATION_CONTACT_CACHE_MAX:10000}
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+

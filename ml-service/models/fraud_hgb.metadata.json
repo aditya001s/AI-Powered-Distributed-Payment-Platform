@@ -1,0 +1,113 @@
+{
+  "algorithm": "HistGradientBoostingClassifier",
+  "calibration": "isotonic",
+  "dataCaveat": "Trained on SYNTHETIC data with an imposed causal structure. The ranking metrics measure recovery of that structure, not real-world fraud detection performance, and must not be quoted as the latter.",
+  "featureCount": 28,
+  "featureNames": [
+    "amount_minor",
+    "amount_log",
+    "is_round_amount",
+    "hour_of_day",
+    "is_night",
+    "is_weekend",
+    "payment_type_is_merchant",
+    "payment_type_is_withdrawal",
+    "account_age_days",
+    "prior_payment_count",
+    "prior_chargeback_count",
+    "avg_amount_minor",
+    "amount_to_avg_ratio",
+    "amount_over_historic_max",
+    "payment_count_1h",
+    "payment_count_24h",
+    "amount_sum_24h_minor",
+    "failed_payment_count_24h",
+    "seconds_since_last_payment",
+    "is_new_device",
+    "distinct_devices_30d",
+    "is_new_country",
+    "distinct_countries_30d",
+    "is_elevated_risk_country",
+    "distance_from_last_km",
+    "has_geo",
+    "is_new_payee",
+    "payee_is_high_risk_category"
+  ],
+  "hyperparameters": {
+    "early_stopping": true,
+    "l2_regularization": 1.0,
+    "learning_rate": 0.06,
+    "max_bins": 128,
+    "max_iter": 300,
+    "max_leaf_nodes": 31,
+    "min_samples_leaf": 40,
+    "n_iter_no_change": 25,
+    "validation_fraction": 0.15
+  },
+  "metrics": {
+    "archetypeRecall": {
+      "account_takeover": {
+        "positives": 181.0,
+        "recall": 0.712707,
+        "threshold": 0.8
+      },
+      "bust_out": {
+        "positives": 102.0,
+        "recall": 0.147059,
+        "threshold": 0.8
+      },
+      "card_testing": {
+        "positives": 104.0,
+        "recall": 0.596154,
+        "threshold": 0.8
+      },
+      "friendly_fraud": {
+        "positives": 63.0,
+        "recall": 0.0,
+        "threshold": 0.8
+      },
+      "mule_cashout": {
+        "positives": 67.0,
+        "recall": 0.328358,
+        "threshold": 0.8
+      }
+    },
+    "averagePrecision": 0.725547,
+    "baselineBrierScore": 0.016936,
+    "brierScore": 0.005329,
+    "expectedCalibrationError": 0.00089,
+    "fraudRows": 2069,
+    "observedFraudRate": 0.017242,
+    "operatingPoints": {
+      "0.45": {
+        "alertRate": 0.018167,
+        "flagged": 545.0,
+        "precision": 0.80367,
+        "recall": 0.847195,
+        "threshold": 0.45
+      },
+      "0.80": {
+        "alertRate": 0.0094,
+        "flagged": 282.0,
+        "precision": 0.808511,
+        "recall": 0.441006,
+        "threshold": 0.8
+      }
+    },
+    "rocAuc": 0.935307,
+    "rows": 120000
+  },
+  "modelVersion": "fraud_hgb-c9026b7d59cb",
+  "provenance": {
+    "calibrationFolds": 3,
+    "dataSource": "synthetic",
+    "numpyVersion": "2.4.3",
+    "pythonVersion": "3.12.3",
+    "randomSeed": 42,
+    "requestedFraudRate": 0.017,
+    "sklearnVersion": "1.8.0",
+    "testSize": 0.25,
+    "trainingRows": 120000
+  },
+  "trainedAt": "2026-09-06T06:57:52Z"
+}

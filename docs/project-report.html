@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AegisPay — Project Report</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    font-size: 10.5pt; line-height: 1.5; color: #1a1a1a; margin: 0;
+  }
+  h1, h2, h3 { color: #0b3d66; }
+  h1 { font-size: 26pt; margin: 0 0 4pt; color: #0b3d66; letter-spacing: -0.5pt; }
+  h2 {
+    font-size: 14pt; margin: 20pt 0 7pt; color: #0b3d66;
+    border-bottom: 2px solid #0b3d66; padding-bottom: 3pt;
+  }
+  h3 { font-size: 11.5pt; margin: 13pt 0 4pt; color: #11507f; }
+  p { margin: 0 0 7pt; text-align: justify; }
+  ul, ol { margin: 0 0 8pt; padding-left: 17pt; }
+  li { margin-bottom: 3.5pt; }
+  table { width: 100%; border-collapse: collapse; margin: 7pt 0 11pt; font-size: 9.3pt; }
+  th, td { border: 1px solid #c3cfd9; padding: 4.5pt 6pt; text-align: left; vertical-align: top; }
+  th { background: #eaf1f7; font-weight: 600; color: #0b3d66; }
+  code {
+    font-family: Consolas, "Courier New", monospace; font-size: 9pt;
+    background: #f1f4f7; padding: 1pt 3pt; border-radius: 2px;
+  }
+  pre {
+    font-family: Consolas, "Courier New", monospace; font-size: 8.6pt;
+    background: #f6f8fa; border: 1px solid #d6dde4; border-left: 3px solid #0b3d66;
+    padding: 7pt 9pt; white-space: pre; overflow: hidden; margin: 7pt 0 10pt;
+    line-height: 1.35;
+  }
+  .cover { text-align: center; padding-top: 48mm; page-break-after: always; }
+  .cover .sub { font-size: 14pt; color: #11507f; margin-top: 6pt; font-weight: 500; }
+  .cover .tag { font-size: 10.5pt; color: #55636e; margin-top: 22pt; line-height: 1.8; }
+  .cover .note {
+    margin: 30mm auto 0; max-width: 118mm; font-size: 9.5pt; color: #7a4a00;
+    background: #fff8e8; border: 1px solid #e8c57a; padding: 9pt 12pt; text-align: left;
+  }
+  .callout {
+    background: #fff8e8; border: 1px solid #e8c57a; border-left: 3px solid #d79316;
+    padding: 7pt 10pt; margin: 9pt 0; font-size: 9.7pt;
+  }
+  .good {
+    background: #eef7ee; border: 1px solid #a9ceA9; border-left: 3px solid #3c8c3c;
+    padding: 7pt 10pt; margin: 9pt 0; font-size: 9.7pt;
+  }
+  .kv { font-size: 9.6pt; }
+  .kv td:first-child { width: 33%; font-weight: 600; color: #0b3d66; background: #f7fafc; }
+  .break { page-break-before: always; }
+  .small { font-size: 8.9pt; color: #5c6670; }
+  .nobreak { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <h1>AegisPay</h1>
+  <div class="sub">AI-Powered Payment Orchestration &amp; Fraud Intelligence Platform</div>
+  <div class="tag">
+    A cloud-native, event-driven digital payment system<br>
+    built as 13 modules with double-entry accounting,<br>
+    machine-learning fraud detection and AI-assisted investigation
+  </div>
+  <div class="tag" style="margin-top:26pt;"><strong>Project Report</strong></div>
+  <div class="note">
+    <strong>Important scope note.</strong> AegisPay is a complete working platform, but it is a
+    <strong>simulation</strong>. It never connects to a real bank, card network or UPI switch.
+    The payment providers are deliberately simulated so that failures, delays and fallback can be
+    tested on demand. The fraud model is trained on synthetic data. These limits are stated
+    throughout this report because they are a design choice, not a gap.
+  </div>
+</div>
+
+<h2>1. Aim of the Project</h2>
+
+<p>
+  The aim of AegisPay is to build a <strong>digital payment platform that is correct about money and
+  intelligent about fraud</strong> — and to prove both claims with tests rather than assert them.
+</p>
+
+<p>Most student payment projects store a balance in one table and add or subtract from it. That works
+  until something goes wrong, and then there is no way to answer the only question that matters:
+  <em>where did the money go?</em> AegisPay is built to answer that question at all times. It sets out
+  to solve four problems that every real payment company faces:</p>
+
+<ol>
+  <li><strong>Money must never be created or destroyed.</strong> Every rupee that moves is recorded
+    twice, in a journal that cannot be edited or deleted, and the books can be proved balanced on
+    demand.</li>
+  <li><strong>A payment touches many services and any one can fail.</strong> If the money is taken but
+    the recording fails, or a provider charges the customer and then goes offline, the system must
+    repair itself rather than leave the customer's money stuck.</li>
+  <li><strong>Fraud must be caught without blocking honest customers.</strong> A machine-learning model
+    scores every payment, and hand-written rules cover the specific attack patterns the model was
+    measured to miss.</li>
+  <li><strong>A human must be able to understand and overrule the machine.</strong> When a payment is
+    held, an analyst gets a written, evidence-cited explanation and the final decision.</li>
+</ol>
+
+<h2>2. What the System Does, in Simple Terms</h2>
+
+<p>AegisPay is a digital wallet platform. A customer holds money in a wallet and sends it to another
+  wallet — like a person paying a shop. Around that simple action sit the controls that make it
+  trustworthy:</p>
+
+<table>
+  <tr><th style="width:27%">Capability</th><th>What it means</th></tr>
+  <tr><td>Wallets</td><td>Each user has a balance. Money can be added (deposit), removed (withdrawal) or sent to another wallet.</td></tr>
+  <tr><td>Payments</td><td>Send money from one wallet to another. The system accepts the request instantly and then processes it safely in the background.</td></tr>
+  <tr><td>Double-entry ledger</td><td>An accountant's journal. Every movement is written as a matching pair of entries, so the totals must always balance.</td></tr>
+  <tr><td>Fraud detection</td><td>Every payment is scored by a trained model and checked against 8 rules. Risky payments are stopped and queued for a human.</td></tr>
+  <tr><td>AI investigation</td><td>For high-risk payments the system writes a plain-English report explaining the risk, quoting the fraud policy that applies.</td></tr>
+  <tr><td>Analyst console</td><td>A web dashboard where staff see payments, risk levels and alerts, and approve or block held payments.</td></tr>
+  <tr><td>Notifications</td><td>The customer is told what happened by email, SMS (both simulated) and a real in-app inbox.</td></tr>
+  <tr><td>Analytics</td><td>Live dashboards of payment volumes, risk distribution and settlement speed.</td></tr>
+</table>
+
+<h2>3. Technology Used</h2>
+
+<table class="kv">
+  <tr><td>Language &amp; platform</td><td>Java 25 (virtual threads enabled, as the work is I/O-bound)</td></tr>
+  <tr><td>Backend framework</td><td>Spring Boot 4.0.8, Spring Cloud 2025.1.3, Spring Security</td></tr>
+  <tr><td>API gateway</td><td>Spring Cloud Gateway 5.0 (reactive WebFlux) — the only public entry point</td></tr>
+  <tr><td>Database</td><td>PostgreSQL 17, one separate database per service; Hibernate for mapping; Flyway owns the schema</td></tr>
+  <tr><td>Vector search</td><td>pgvector — stores fraud policy documents as vectors for AI retrieval</td></tr>
+  <tr><td>Cache &amp; locks</td><td>Redis 7.4 — duplicate-request protection, distributed locks, rate limiting</td></tr>
+  <tr><td>Messaging</td><td>Apache Kafka 3.9 in KRaft mode — 14 event topics, each with a dead-letter topic</td></tr>
+  <tr><td>Resilience</td><td>Resilience4j 2.4 — retries, timeouts and circuit breakers, wired in code not annotations</td></tr>
+  <tr><td>Machine learning</td><td>Python 3.12, FastAPI, scikit-learn <code>HistGradientBoostingClassifier</code> with isotonic calibration</td></tr>
+  <tr><td>Frontend</td><td>React 19, TypeScript 7, Vite 8; charts hand-drawn in SVG so the maths is testable</td></tr>
+  <tr><td>Serving the UI</td><td>nginx (unprivileged) serving static files — no Node.js in the runtime image</td></tr>
+  <tr><td>Testing</td><td>JUnit 5, AssertJ, Mockito, ArchUnit, Testcontainers 2.0, pytest, Vitest</td></tr>
+  <tr><td>Packaging &amp; ops</td><td>Docker &amp; Docker Compose (15 containers), Kubernetes Helm chart, GitHub Actions CI, CodeQL</td></tr>
+  <tr><td>Observability</td><td>Micrometer → Prometheus, OpenTelemetry, structured JSON logs with correlation IDs</td></tr>
+</table>
+
+<h3>Why these choices</h3>
+<ul>
+  <li><strong>Money is stored as whole paise in a <code>long</code>, never a decimal.</strong> Computers
+    cannot represent 0.01 exactly in binary floating point, so adding it repeatedly loses money.</li>
+  <li><strong>A separate database per service.</strong> One service physically cannot read another's
+    tables, even by mistake. Reporting is rebuilt from the event stream instead.</li>
+  <li><strong>Asymmetric JWT signing (RS256).</strong> Only the auth service holds the private signing
+    key; everyone else verifies with the public key. With a shared password-style key, any compromised
+    service could mint an admin token.</li>
+</ul>
+
+<h2 class="break">4. System Architecture</h2>
+
+<p>The platform is made of 13 modules: 10 Java applications, a Python ML service, a React dashboard,
+  and a shared library. Each Java service owns its own database and talks to the others through Kafka
+  events or authenticated internal HTTP calls.</p>
+
+<table>
+  <tr><th style="width:21%">Service</th><th style="width:8%">Port</th><th>Responsibility</th></tr>
+  <tr><td>api-gateway</td><td>8080</td><td>The only public port. Validates tokens, limits request rates, adds correlation IDs, routes to services.</td></tr>
+  <tr><td>auth-service</td><td>8081</td><td>The sole issuer of tokens. Users, login, refresh-token rotation, account lockout, audit trail.</td></tr>
+  <tr><td>wallet-service</td><td>8082</td><td>Balances and holds. Reserve, capture and release funds. Deposits and withdrawals.</td></tr>
+  <tr><td>ledger-service</td><td>8083</td><td>The book of record: an append-only double-entry journal, trial balance and reconciliation.</td></tr>
+  <tr><td>payment-service</td><td>8084</td><td>The public payment API. Accepts a payment, guards against duplicates, tracks its status.</td></tr>
+  <tr><td>payment-orchestrator</td><td>8085</td><td>Runs the saga: chooses a provider, retries, falls back, breaks circuits, and undoes work on failure.</td></tr>
+  <tr><td>fraud-service</td><td>8086</td><td>Combines the ML score with 8 rules into a verdict, raises alerts, records analyst decisions.</td></tr>
+  <tr><td>ai-investigation-service</td><td>8087</td><td>Writes a cited investigation report using retrieval over a fraud-policy knowledge base.</td></tr>
+  <tr><td>notification-service</td><td>8088</td><td>Email and SMS (simulated) plus a real in-app inbox, de-duplicated, with its own retry queue.</td></tr>
+  <tr><td>analytics-service</td><td>8089</td><td>Builds read-only dashboards from the event stream. Keeps one row per payment.</td></tr>
+  <tr><td>ml-service</td><td>8000</td><td>Python/FastAPI. Returns a calibrated fraud probability and per-feature explanations. Measures only.</td></tr>
+  <tr><td>frontend</td><td>5173</td><td>React operations console for staff.</td></tr>
+  <tr><td>platform-common</td><td>—</td><td>Shared library: money type, events, outbox, idempotency, security, resilience helpers.</td></tr>
+</table>
+
+<div class="good">
+  <strong>A design principle worth highlighting:</strong> <em>the model measures, the platform decides.</em>
+  The ML service returns only a probability — never a decision. Turning a probability into
+  APPROVE / REVIEW / HOLD / REJECT needs the business rules too, and only the fraud service has both.
+  This also means a fraud team can retune a threshold as a configuration change, instead of
+  redeploying a model.
+</div>
+
+<h2>5. How a Payment Works, Step by Step</h2>
+
+<p>When a customer sends money, the API replies <code>202 Accepted</code> almost immediately — meaning
+  "accepted, not finished". The real work then runs as a <strong>saga</strong>: a sequence of steps that
+  records what it has done, so it can undo its work if a later step fails.</p>
+
+<pre>  Customer  ──▶  POST /api/payments  ──▶  202 Accepted (status CREATED)
+                        │
+                        └─▶ "payment-created" event on Kafka
+                                   │
+                        payment-orchestrator starts the saga
+                                   │
+     1. RESERVE_FUNDS   ─▶ wallet-service    make the money unspendable
+     2. ASSESS_RISK     ─▶ fraud-service     APPROVE / REVIEW continue
+                                             HOLD   → park, wait for a human
+                                             REJECT → undo everything
+     3. AUTHORIZE       ─▶ provider          choose one, retry, fall back
+     4. POST_LEDGER     ─▶ ledger-service    write the books BEFORE money moves
+     5. CAPTURE_FUNDS   ─▶ wallet-service    debit payer, credit payee (one transaction)
+     6. COMPLETE        ─▶ announce "payment-completed"</pre>
+
+<h3>Two orderings that carry real weight</h3>
+<ul>
+  <li><strong>Reserve before authorising.</strong> Asking a provider to charge money the customer does
+    not have wastes the call and causes an avoidable decline. The reservation also stops a second
+    payment spending the same money at the same time.</li>
+  <li><strong>Record in the ledger before moving the money.</strong> Money should never move without a
+    record. If the system crashes between the two, the books show a transfer that did not happen —
+    which reconciliation detects and a reversal corrects. The opposite order moves real money with no
+    record of why, which is far worse.</li>
+</ul>
+
+<h3>The saga's states</h3>
+<p>The saga stores its state, and only legal moves between states are allowed:</p>
+<pre>  STARTED → FUNDS_RESERVED → RISK_ASSESSED → AUTHORIZED → LEDGER_POSTED → CAPTURED → COMPLETED
+                   │              ▲
+                   ▼              │
+               RISK_HELD ─────────┘        (waiting for an analyst)
+                   │
+             COMPENSATING → FAILED / REJECTED</pre>
+
+<p>Once the state reaches <code>CAPTURED</code> there is deliberately <strong>no route back to
+  compensation</strong>. Undoing a payment whose money has already legitimately moved would hand back
+  funds that were correctly taken, so the only correct direction is forward.</p>
+
+<h3>When things go wrong</h3>
+<ul>
+  <li><strong>Undo is driven by handles, not by status.</strong> Each step saves a receipt
+    (<code>holdId</code>, <code>authorizationId</code>, <code>ledgerTransactionId</code>) the moment it
+    succeeds. If the system crashes after a provider approved a charge but before the status was
+    updated, checking the status would miss the real charge — so the system asks "is there a receipt
+    for this?" instead.</li>
+  <li><strong>A decline is not a failure.</strong> A provider saying "no" is returned as an answer; a
+    provider that fails to answer is thrown as a fault. Mixing the two is how a system ends up retrying
+    a decline until it accidentally succeeds, or disabling a healthy provider because customers were
+    short of funds.</li>
+  <li><strong>Lost charges are recovered.</strong> If a provider charges the customer and then times
+    out, the saga looks the charge up by its own reference and cancels it before trying another
+    provider.</li>
+  <li><strong>Stuck payments are swept up.</strong> A background job finds sagas whose progress stopped
+    and drives them forward again, so a crash mid-payment does not leave money frozen.</li>
+</ul>
+
+<h2 class="break">6. The Ledger — Why the Money Is Trustworthy</h2>
+
+<p>The ledger is the heart of the project's correctness claim. It is a genuine
+  <strong>double-entry</strong> accounting system, and the rules are enforced by the
+  <strong>database</strong> rather than by application code that could be bypassed.</p>
+
+<table>
+  <tr><th style="width:30%">Guarantee</th><th>How it is enforced</th></tr>
+  <tr><td>Nothing can be changed or deleted</td><td>Database triggers reject every UPDATE and DELETE on the journal tables.</td></tr>
+  <tr><td>Every entry balances</td><td>A deferred constraint trigger re-checks at commit time that debits equal credits equal the declared total.</td></tr>
+  <tr><td>Stored balances cannot drift</td><td>A CHECK constraint derives each balance from that account's own debit and credit totals.</td></tr>
+  <tr><td>The same event cannot post twice</td><td>Each posting carries a derived unique id such as <code>LTX-PAY-&lt;paymentId&gt;</code>, so a repeated message is recognised as a replay.</td></tr>
+</table>
+
+<p>A customer's wallet is modelled as a <strong>liability</strong> — the platform owes the customer
+  their money — so a credit increases a wallet. The report notes this is the single most commonly
+  mis-modelled thing in payment systems.</p>
+
+<pre>  Deposit    DEBIT  asset:external-funding:INR    an asset arrived
+             CREDIT wallet:WAL-…                  we now owe the customer
+
+  Transfer   DEBIT  wallet:PAYER                  we owe the payer less
+             CREDIT wallet:PAYEE                  we owe the payee more</pre>
+
+<p><strong>Mistakes are fixed by adding the opposite entry, never by editing.</strong> Both entries stay
+  visible and cancel out, because deleting the original would destroy the evidence that it ever
+  happened — which is exactly what an audit needs.</p>
+
+<p><strong>Reconciliation can actually fail.</strong> Four independent checks run: the trial balance,
+  stored balances replayed from the journal, each posting's internal integrity, and every account's
+  running-balance chain. It is read-only and never silently repairs anything, because the cause of a
+  discrepancy matters far more than the symptom. The test suite deliberately corrupts the ledger and
+  requires the mismatch to be reported — a check that can only ever return "consistent" would be
+  manufacturing confidence.</p>
+
+<h2>7. Fraud Detection</h2>
+
+<h3>The machine-learning model</h3>
+<table class="kv">
+  <tr><td>Algorithm</td><td>scikit-learn <code>HistGradientBoostingClassifier</code>, isotonic calibration (3 folds)</td></tr>
+  <tr><td>Model version</td><td><code>fraud_hgb-c9026b7d59cb</code></td></tr>
+  <tr><td>Input features</td><td>28, covering amount, timing, account history, spending behaviour, velocity, device, location and counterparty</td></tr>
+  <tr><td>Training data</td><td>120,000 synthetic rows with 2,069 fraud cases (1.72%), fixed random seed 42</td></tr>
+  <tr><td>ROC-AUC</td><td>0.935</td></tr>
+  <tr><td>Average precision</td><td>0.726</td></tr>
+  <tr><td>Calibration error</td><td>0.00089 (Brier score 0.0053 against a 0.0169 baseline)</td></tr>
+  <tr><td>At threshold 0.45</td><td>precision 0.80, recall 0.85, alerting on 1.8% of payments</td></tr>
+  <tr><td>At threshold 0.80</td><td>precision 0.81, recall 0.44, alerting on 0.9% of payments</td></tr>
+</table>
+
+<div class="callout">
+  <strong>Honest reading of these numbers.</strong> The model is trained on synthetic data with a
+  deliberately imposed pattern. The scores measure how well the model recovers <em>that pattern</em> —
+  they are not evidence of real-world fraud-detection performance, and the project's own model metadata
+  says so explicitly. Being able to state this clearly is part of the engineering quality.
+</div>
+
+<h3>Why rules exist as well as a model</h3>
+<p>Not out of distrust — because the model's weaknesses were <strong>measured</strong>. Recall per attack
+  type at the blocking threshold:</p>
+
+<table>
+  <tr><th>Attack pattern</th><th style="width:16%">Model recall</th><th>Interpretation</th></tr>
+  <tr><td>Account takeover</td><td>0.71</td><td>Model handles this well</td></tr>
+  <tr><td>Card testing</td><td>0.60</td><td>Reasonable</td></tr>
+  <tr><td>Mule cash-out</td><td>0.33</td><td>Weak — needs a rule</td></tr>
+  <tr><td>Bust-out</td><td>0.15</td><td>Almost entirely missed — needs a rule</td></tr>
+  <tr><td>Friendly fraud</td><td>0.00</td><td>Correctly impossible to detect from payment data</td></tr>
+</table>
+
+<p>A <em>bust-out</em> is a well-behaved account of a year's standing suddenly sending its largest-ever
+  payment to a brand-new recipient. Feature by feature that is nearly identical to a customer finally
+  buying a car, so the model cannot separate them. A rule can, because it insists on the
+  <strong>combination</strong>: established history <em>and</em> a large multiple of the previous maximum
+  <em>and</em> a recipient never paid before.</p>
+
+<p>Rules also express things a probability cannot. Travelling 6,000 km in eleven minutes is not a risk
+  score — it is a physical contradiction.</p>
+
+<h3>The 8 rules</h3>
+<table>
+  <tr><th style="width:40%">Rule</th><th style="width:16%">Action</th><th>Fires when</th></tr>
+  <tr><td>Confirmed fraud history</td><td>Review / Block</td><td>An analyst previously confirmed fraud on this account</td></tr>
+  <tr><td>Bust-out pattern</td><td>Hold</td><td>Long history + new recipient + far above the historic maximum</td></tr>
+  <tr><td>Card-testing velocity</td><td>Hold</td><td>Many failures in 24h together with a burst of attempts in 1h</td></tr>
+  <tr><td>Impossible travel</td><td>Hold</td><td>Implied travel speed above 900 km/h since the last payment</td></tr>
+  <tr><td>New device, high value</td><td>Review</td><td>Unseen device and a large multiple of the usual amount</td></tr>
+  <tr><td>Dormant account, large payment</td><td>Review</td><td>Unused for 90+ days, now sending far above average</td></tr>
+  <tr><td>Unfamiliar cash-out corridor</td><td>Review</td><td>Withdrawal to a new recipient from an unfamiliar country</td></tr>
+  <tr><td>First payment unusually large</td><td>Advisory</td><td>No history at all and a large amount</td></tr>
+</table>
+
+<p>Two further design rules: <strong>every rule is evaluated</strong>, not just the first to match,
+  because an analyst most wants to know which patterns appeared <em>together</em>; and
+  <strong>rules escalate only</strong>. A rule can make a verdict more cautious, never less — otherwise
+  adding a rule could let fraud through.</p>
+
+<h3>How a held payment is resolved</h3>
+<p>A HOLD verdict parks the saga at <code>RISK_HELD</code> and extends the hold on the customer's funds.
+  The fraud service raises an alert; an analyst claims it in the dashboard and chooses RELEASE or
+  BLOCK. That decision is written to an append-only table — the database refuses any later edit — and
+  the identity of the decider is read from the verified token, never from the request. The decision is
+  published as an event, and it is the <em>only</em> thing that can un-park the payment.</p>
+
+<h2 class="break">8. AI Investigation (RAG)</h2>
+
+<p>When a payment is scored high-risk, the AI investigation service writes an explanation an analyst can
+  act on. It uses <strong>retrieval-augmented generation</strong>: it finds the fraud policy documents
+  relevant to this specific payment and writes a narrative that cites them.</p>
+
+<ul>
+  <li><strong>Knowledge base:</strong> 12 fraud-policy documents (account takeover, bust-out, card
+    testing, impossible travel, mule cash-out, evidence standards, and others).</li>
+  <li><strong>Retrieval:</strong> documents are split into overlapping chunks and converted to
+    384-dimension vectors stored in pgvector. Policies are also matched directly by the rule id that
+    fired, which guarantees the right policy is always retrieved.</li>
+  <li><strong>Every citation is verified</strong> against what was actually retrieved, so the report
+    cannot quote a document it never read.</li>
+  <li><strong>Privacy by construction:</strong> the prompt contains the payment facts, amounts, device
+    and location — but no customer name, email, phone or wallet id.</li>
+  <li><strong>It recommends; it never acts.</strong> The service deliberately holds
+    <em>no credential</em> for any write API, and an automated test inspects its fields so that a
+    wallet, ledger or payment client cannot be added later.</li>
+</ul>
+
+<div class="callout">
+  <strong>Stated honestly:</strong> the embedding is signed feature hashing over words and character
+  n-grams — lexical matching expressed as vectors. It is <em>not</em> semantic and will not match a
+  paraphrase. The code says so, and the API reports <code>isSemantic = false</code>. The default report
+  writer makes no outbound network call at all; using a hosted language model is an opt-in path.
+</div>
+
+<h2>9. Security</h2>
+
+<table>
+  <tr><th style="width:27%">Control</th><th>Implementation</th></tr>
+  <tr><td>Token signing</td><td>RS256. Only auth-service holds the private key; the public key is published at a JWKS endpoint for others to verify.</td></tr>
+  <tr><td>Roles</td><td>USER, MERCHANT, FRAUD_ANALYST, ADMIN, SERVICE. Every security chain ends in "authenticated", so a new endpoint is protected by default.</td></tr>
+  <tr><td>Service-to-service</td><td>Short-lived OAuth2 client-credential tokens, not a shared static key, so every internal call is attributable.</td></tr>
+  <tr><td>Internal endpoints</td><td><code>/internal/**</code> has no gateway route, is explicitly blocked at the gateway, and additionally requires the SERVICE role.</td></tr>
+  <tr><td>Rate limiting</td><td>Redis token bucket at the gateway. Login limited per IP address; customer and admin routes limited per user.</td></tr>
+  <tr><td>Duplicate protection</td><td>Three layers: a Redis fast path, a PostgreSQL primary key as the authority, and a derived natural key for money operations.</td></tr>
+  <tr><td>Passwords</td><td>BCrypt at cost 12, a 12-character policy with a deny-list, and identical responses for every login failure so attackers learn nothing from timing.</td></tr>
+  <tr><td>Refresh tokens</td><td>Single-use, stored only as hashes. Reuse is treated as theft and revokes the whole session family.</td></tr>
+  <tr><td>Audit trails</td><td>Database triggers make analyst decisions, investigations, notifications and the ledger append-only.</td></tr>
+  <tr><td>Browser safety</td><td>Access token kept in memory only; strict Content-Security-Policy; framing denied. The dashboard holds no secret.</td></tr>
+</table>
+
+<div class="good">
+  <strong>A genuinely notable finding.</strong> A transaction-boundary audit discovered that three
+  security controls — account lockout, refresh-token reuse detection and the disabled-account check —
+  had been written correctly but <strong>never actually worked</strong>: each recorded its decision
+  inside a transaction that was then rolled back, erasing the record. They were fixed by committing
+  security state on a separate transaction, and automated tests now enforce that shape so the bug
+  cannot return. Finding a class of defect that passes ordinary testing is a strong result to present.
+</div>
+
+<h2>10. Testing and Quality</h2>
+
+<table class="kv">
+  <tr><td>Java tests</td><td><strong>1,811 passing</strong> — 1,379 unit/structural plus 432 integration, with 0 failures, 0 errors and 0 skipped</td></tr>
+  <tr><td>Python tests</td><td><strong>129 passing</strong> for the ML service</td></tr>
+  <tr><td>Dashboard tests</td><td>Vitest and Testing Library, covering the API client, token refresh, chart maths and the approve/block workflow</td></tr>
+  <tr><td>Integration testing</td><td>Testcontainers starts <strong>real PostgreSQL and Kafka</strong> — because row locking, <code>SKIP LOCKED</code> and consumer rebalancing do not exist in an in-memory fake</td></tr>
+  <tr><td>Token realism</td><td>Integration tests mint real RS256 tokens against a local JWKS server, so the suite can prove forged and expired tokens are refused</td></tr>
+  <tr><td>Structural tests</td><td>ArchUnit enforces module boundaries and transaction shapes, so architectural rules cannot quietly erode</td></tr>
+</table>
+
+<p>Deliberately adversarial tests include: firing two crossing transfers (A→B and B→A simultaneously)
+  and requiring both to succeed, which proves the deadlock-avoidance ordering works; attacking the
+  ledger's immutability triggers with raw SQL; disabling a balance trigger to prove reconciliation
+  really detects corruption; and flushing Redis before replaying a request to prove duplicate
+  protection does not depend on the cache.</p>
+
+<h2 class="break">11. Benefits of This Design</h2>
+
+<h3>Correctness you can prove</h3>
+<p>At any moment the platform can be asked whether its books balance and whether wallet balances agree
+  with the ledger, and it answers with evidence. Because the journal is append-only and enforced by the
+  database, a bug in the application cannot quietly rewrite history.</p>
+
+<h3>It survives partial failure</h3>
+<p>Services crash, networks time out and providers go offline. The saga pattern, the transactional
+  outbox, idempotency at three layers and the recovery sweep mean these produce a <em>recoverable</em>
+  outcome instead of lost money or a frozen balance.</p>
+
+<h3>Fraud detection that is measured, not asserted</h3>
+<p>The project states where the model performs well and where it fails, and fills the measured gaps with
+  rules. That is how fraud systems are actually built, and it is more defensible than a single accuracy
+  figure.</p>
+
+<h3>Decisions a human can audit</h3>
+<p>Every held payment comes with an explanation citing the policy that applies. Every analyst decision
+  is permanently recorded with the identity taken from a verified token. Nothing important happens that
+  cannot be explained afterwards.</p>
+
+<h3>Independent, replaceable parts</h3>
+<p>Each service owns its data and communicates through events, so one can be changed, scaled or
+  rewritten without touching the others. The ML model can be retrained and the thresholds retuned
+  without redeploying the payment path.</p>
+
+<h3>Secure by default</h3>
+<p>Deny-by-default authorisation, asymmetric tokens, short-lived service credentials and an AI service
+  that holds no credentials at all mean a single compromised component cannot escalate into control of
+  the money.</p>
+
+<h2>12. Real-World Usefulness</h2>
+
+<p>Every mechanism here exists in production payment companies, and the problems it solves are real:</p>
+
+<table>
+  <tr><th style="width:32%">Real-world problem</th><th>How AegisPay addresses it</th></tr>
+  <tr><td>"The app says it paid but the money is gone"</td><td>Ledger-before-capture ordering plus reconciliation means an inconsistency is detected and corrected rather than discovered by the customer.</td></tr>
+  <tr><td>A payment provider goes down mid-transaction</td><td>Circuit breakers stop calling a broken provider; routing falls back to another; orphaned charges are looked up and cancelled.</td></tr>
+  <tr><td>A customer is charged twice</td><td>Idempotency keys at three layers plus derived natural keys in the ledger make a repeated request return the original result.</td></tr>
+  <tr><td>Stolen credentials drain an account</td><td>Impossible-travel, new-device and card-testing rules combined with the model hold the payment before the money leaves.</td></tr>
+  <tr><td>Fraud teams drown in false positives</td><td>Calibrated probabilities with explicit thresholds let a team choose its own precision/recall trade-off as a config change.</td></tr>
+  <tr><td>Regulators ask "why was this blocked?"</td><td>Cited investigation narratives and an append-only decision trail provide a defensible answer.</td></tr>
+  <tr><td>An auditor asks for the books</td><td>A genuine double-entry journal that cannot be edited, with a trial balance on demand.</td></tr>
+  <tr><td>An incident needs a provider switched off</td><td>An operator kill switch that persists across restarts and requires a written reason.</td></tr>
+</table>
+
+<p>The same architecture underlies digital wallets, UPI-style payment apps, card acquirers and
+  payment-service providers. The skills demonstrated — event-driven microservices, distributed
+  transactions, double-entry accounting, applied machine learning and secure API design — map directly
+  onto how payment, fintech and banking systems are built.</p>
+
+<h2>13. Honest Limitations</h2>
+
+<p>Stating these strengthens the project rather than weakening it, because each is a conscious decision
+  with a reason:</p>
+
+<ul>
+  <li><strong>No real payment rail.</strong> SWIFTPAY, NEXUSPAY and PAYBRIDGE are invented, simulated
+    providers. No bank, card network or UPI switch is contacted. This is deliberate: a simulated
+    provider can be made to fail, hang, decline or lose an acknowledgement on command, which is the
+    only practical way to test the recovery paths.</li>
+  <li><strong>The fraud model uses synthetic data.</strong> Its metrics measure recovery of an imposed
+    pattern, not real fraud performance. Real transaction data is not publicly available for good
+    reason.</li>
+  <li><strong>Retrieval is lexical, not semantic.</strong> The embedding will not match a paraphrase,
+    and the system reports this rather than implying otherwise.</li>
+  <li><strong>Email and SMS are simulated.</strong> The in-app inbox is real; the external channels are
+    not connected to a provider.</li>
+  <li><strong>Single-machine deployment.</strong> It runs as 15 Docker containers on one host. A
+    Kubernetes Helm chart exists but a multi-node deployment has not been exercised.</li>
+</ul>
+
+<h2>14. Project Scale</h2>
+
+<table class="kv">
+  <tr><td>Code modules</td><td>13 (10 Java applications, Python ML service, React dashboard, shared library)</td></tr>
+  <tr><td>Java source files</td><td>280 main, 102 test</td></tr>
+  <tr><td>Containers</td><td>15 (PostgreSQL, Redis, Kafka, 10 Java services, ML service, frontend)</td></tr>
+  <tr><td>Databases</td><td>9 isolated service databases, 29 Flyway migrations, ~49 tables</td></tr>
+  <tr><td>Kafka topics</td><td>14, each with a dead-letter twin (28 total)</td></tr>
+  <tr><td>Fraud rules</td><td>8 deterministic rules plus the 28-feature ML model</td></tr>
+  <tr><td>Fraud policy documents</td><td>12, indexed as 384-dimension vectors</td></tr>
+  <tr><td>Simulated providers</td><td>3, with different fees, latencies, currency support and limits</td></tr>
+  <tr><td>Automated tests</td><td>1,811 Java + 129 Python, all passing</td></tr>
+  <tr><td>Memory footprint</td><td>Runs in 2.9 GiB measured, capped at 4.98 GiB, on an 8 GB laptop</td></tr>
+</table>
+
+<h2>15. Running the Project</h2>
+
+<p>The whole platform starts with one command. Services are started in stages so that an 8 GB machine is
+  never overloaded:</p>
+
+<pre>  cd c:\Users\adity\ansel
+  .\scripts\low-memory.ps1 start          # starts all 15 containers, waits until healthy
+  .\scripts\panel-demo.ps1 seed           # creates demo accounts, payments and a fraud alert
+
+  .\scripts\demo-payment.ps1              # makes one live payment end to end
+  .\scripts\demo-payment.ps1 -Fraud       # triggers a fraud hold for the analyst workflow
+
+  .\scripts\low-memory.ps1 stop           # stops everything</pre>
+
+<table class="kv">
+  <tr><td>Operations dashboard</td><td><code>http://127.0.0.1:5173</code></td></tr>
+  <tr><td>API documentation</td><td><code>http://127.0.0.1:8080/swagger-ui.html</code></td></tr>
+</table>
+
+<p class="small" style="margin-top:14pt;">
+  Note: use <code>127.0.0.1</code> rather than <code>localhost</code>. All containers publish on IPv4
+  only, and <code>localhost</code> can resolve to IPv6 first in a browser.
+</p>
+
+<h2>16. Conclusion</h2>
+
+<p>AegisPay demonstrates that a payment platform's hardest problems are not in moving a number from one
+  row to another — they are in staying correct when something fails halfway, proving afterwards that
+  nothing was lost, and making an automated risk decision that a human can understand and overturn.</p>
+
+<p>The project addresses each of those directly: a double-entry ledger whose rules the database itself
+  enforces; a saga that records what it has done so it can undo it; a fraud system that measures its own
+  blind spots and covers them with rules; and an AI layer that explains its reasoning with citations
+  while holding no power to act. All of it is backed by 1,940 automated tests, including integration
+  tests against real PostgreSQL and Kafka, and it runs within 2.9 GiB on an ordinary 8 GB laptop.</p>
+
+<p>Equally deliberate is what the project refuses to claim. The providers are simulated, the fraud model
+  is trained on synthetic data, and the document retrieval is lexical rather than semantic — each stated
+  plainly in the code and in this report. Knowing precisely what a system does and does not prove is
+  itself an engineering result.</p>
+
+</body>
+</html>

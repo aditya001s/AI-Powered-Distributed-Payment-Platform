@@ -1,0 +1,229 @@
+# Local-development resource profile for an 8-GB Windows PC.
+#
+# This file is deliberately NOT named docker-compose.override.yml: production and
+# unconstrained development keep using docker-compose.yml unless this file is
+# selected explicitly:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml <command>
+#
+# Hard limits total 5,100 MiB (4.98 GiB). The explicit JVM heap is 192 MiB;
+# service-specific container limits provide native/metaspace/direct-buffer headroom.
+
+x-local-java-env: &local-java-env
+  JAVA_TOOL_OPTIONS: >-
+    -Xms64m
+    -Xmx192m
+    -XX:+UseSerialGC
+    -XX:ReservedCodeCacheSize=48m
+    -Xss512k
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:HeapDumpPath=/tmp
+    -Djava.security.egd=file:/dev/./urandom
+    -Dfile.encoding=UTF-8
+    -Duser.timezone=UTC
+  # Concurrency is per @KafkaListener. One preserves every consumer and topic while
+  # avoiding 14 analytics consumer threads/clients on a small development machine.
+  AEGIS_KAFKA_CONCURRENCY: "1"
+  # Nine JPA services share one PostgreSQL process. Four still permits concurrent
+  # requests while reducing the theoretical connection count from 108 to 36.
+  SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "4"
+  SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
+  SERVER_TOMCAT_THREADS_MAX: "50"
+  # Keep tracing functional locally, but do not retain/export every request.
+  MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "0.1"
+
+x-local-java-base: &local-java-base
+  # Avoid an all-service restart storm when Docker Desktop/WSL restarts. The
+  # low-memory helper starts services in dependency waves instead.
+  restart: "no"
+  environment: *local-java-env
+  build:
+    args:
+      # Build-stage only; runtime JVM options are defined above.
+      MAVEN_OPTS: >-
+        -Xms128m
+        -Xmx768m
+        -XX:+UseSerialGC
+        -Djava.awt.headless=true
+
+x-local-java-300: &local-java-300
+  <<: *local-java-base
+  mem_limit: 300M
+  mem_reservation: 96M
+  deploy:
+    resources:
+      limits:
+        memory: 300M
+      reservations:
+        memory: 96M
+
+x-local-java-320: &local-java-320
+  <<: *local-java-base
+  mem_limit: 320M
+  mem_reservation: 112M
+  deploy:
+    resources:
+      limits:
+        memory: 320M
+      reservations:
+        memory: 112M
+
+x-local-java-352: &local-java-352
+  <<: *local-java-base
+  mem_limit: 352M
+  mem_reservation: 128M
+  deploy:
+    resources:
+      limits:
+        memory: 352M
+      reservations:
+        memory: 128M
+
+x-local-java-384: &local-java-384
+  <<: *local-java-base
+  mem_limit: 384M
+  mem_reservation: 144M
+  deploy:
+    resources:
+      limits:
+        memory: 384M
+      reservations:
+        memory: 144M
+
+x-local-java-416: &local-java-416
+  <<: *local-java-base
+  mem_limit: 416M
+  mem_reservation: 160M
+  deploy:
+    resources:
+      limits:
+        memory: 416M
+      reservations:
+        memory: 160M
+
+services:
+  postgres:
+    restart: "no"
+    mem_limit: 256M
+    mem_reservation: 96M
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 96M
+    command:
+      - postgres
+      - -c
+      - max_connections=80
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - work_mem=1MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - log_lock_waits=on
+
+  redis:
+    restart: "no"
+    mem_limit: 128M
+    mem_reservation: 32M
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      # Leave half the cgroup for allocator/client/AOF rewrite overhead.
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+
+  kafka:
+    restart: "no"
+    mem_limit: 512M
+    mem_reservation: 160M
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms192m -Xmx256m"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 160M
+    healthcheck:
+      # kafka-topics.sh launches another JVM. Cap that probe separately so it
+      # cannot briefly consume a second broker-sized heap inside the same cgroup.
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS='-Xms32m -Xmx64m' /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 15s
+      retries: 20
+      start_period: 90s
+
+  api-gateway: *local-java-300
+
+  # Notification crossed 85% of 300 MiB during a cold start.
+  auth-service: *local-java-320
+  notification-service: *local-java-320
+
+  # Ledger remained above 95% after cold-start caches settled.
+  ledger-service: *local-java-384
+
+  # Wallet and payment retain extra native/GC headroom for panel transaction bursts.
+  wallet-service: *local-java-384
+  payment-service: *local-java-416
+
+  # Fraud crossed 88% while starting its Kafka consumers and ML client.
+  fraud-service: *local-java-384
+
+  # Provider scheduling/recovery remains the heaviest orchestration path. On the
+  # constrained VM healthy fraud calls measured ~2.2s, so the local slow-call
+  # threshold is 5s instead of the production-like 1.5s. Failure-rate protection
+  # remains unchanged.
+  payment-orchestrator:
+    <<: *local-java-416
+    environment:
+      <<: *local-java-env
+      CB_SLOW_CALL_DURATION_MS: "5000"
+
+  # RAG validation and seven Kafka listeners are heavier than normal services,
+  # but measured safely below these caps with local concurrency one.
+  ai-investigation-service: *local-java-352
+  analytics-service: *local-java-352
+
+  ml-service:
+    restart: "no"
+    mem_limit: 512M
+    mem_reservation: 192M
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 192M
+
+  frontend:
+    restart: "no"
+    # Runtime is nginx only; measured idle RSS is about 4 MiB.
+    mem_limit: 64M
+    mem_reservation: 16M
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 16M

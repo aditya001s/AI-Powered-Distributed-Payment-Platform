@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegispay.fullname" . }}-config
+  labels:
+    {{- include "aegispay.labels" . | nindent 4 }}
+data:
+  PLATFORM_ENV: {{ .Values.global.platformEnvironment | quote }}
+  SPRING_PROFILES_ACTIVE: {{ .Values.global.platformEnvironment | quote }}
+  LOG_LEVEL: {{ .Values.global.logLevel | quote }}
+  LOG_JSON: {{ .Values.global.logJson | quote }}
+  DEFAULT_CURRENCY: {{ .Values.applicationConfig.defaultCurrency | quote }}
+  GATEWAY_URL: {{ .Values.global.publicGatewayUrl | quote }}
+  JWT_ISSUER: {{ .Values.global.jwtIssuer | quote }}
+{{- if .Values.infrastructure.postgresql.enabled }}
+  POSTGRES_HOST: {{ include "aegispay.componentName" (list . "postgresql") | quote }}
+{{- else }}
+  POSTGRES_HOST: {{ required "infrastructure.postgresql.host is required when bundled PostgreSQL is disabled" .Values.infrastructure.postgresql.host | quote }}
+{{- end }}
+  POSTGRES_PORT: {{ .Values.infrastructure.postgresql.port | quote }}
+  AUTH_DB_NAME: {{ (index .Values.services "auth-service").database | quote }}
+  WALLET_DB_NAME: {{ (index .Values.services "wallet-service").database | quote }}
+  LEDGER_DB_NAME: {{ (index .Values.services "ledger-service").database | quote }}
+  PAYMENT_DB_NAME: {{ (index .Values.services "payment-service").database | quote }}
+  ORCHESTRATOR_DB_NAME: {{ (index .Values.services "payment-orchestrator").database | quote }}
+  FRAUD_DB_NAME: {{ (index .Values.services "fraud-service").database | quote }}
+  AI_DB_NAME: {{ (index .Values.services "ai-investigation-service").database | quote }}
+  NOTIFICATION_DB_NAME: {{ (index .Values.services "notification-service").database | quote }}
+  ANALYTICS_DB_NAME: {{ (index .Values.services "analytics-service").database | quote }}
+{{- if .Values.infrastructure.redis.enabled }}
+  REDIS_HOST: {{ include "aegispay.componentName" (list . "redis") | quote }}
+{{- else }}
+  REDIS_HOST: {{ required "infrastructure.redis.host is required when bundled Redis is disabled" .Values.infrastructure.redis.host | quote }}
+{{- end }}
+  REDIS_PORT: {{ .Values.infrastructure.redis.port | quote }}
+{{- if .Values.infrastructure.kafka.enabled }}
+  KAFKA_BOOTSTRAP_SERVERS: {{ printf "%s:9092" (include "aegispay.componentName" (list . "kafka")) | quote }}
+{{- else }}
+  KAFKA_BOOTSTRAP_SERVERS: {{ required "infrastructure.kafka.bootstrapServers is required when bundled Kafka is disabled" .Values.infrastructure.kafka.bootstrapServers | quote }}
+{{- end }}
+  AUTH_JWKS_URI: {{ printf "http://%s:8081/.well-known/jwks.json" (include "aegispay.componentName" (list . "auth-service")) | quote }}
+  AUTH_SERVICE_URL: {{ printf "http://%s:8081" (include "aegispay.componentName" (list . "auth-service")) | quote }}
+  WALLET_SERVICE_URL: {{ printf "http://%s:8082" (include "aegispay.componentName" (list . "wallet-service")) | quote }}
+  LEDGER_SERVICE_URL: {{ printf "http://%s:8083" (include "aegispay.componentName" (list . "ledger-service")) | quote }}
+  PAYMENT_SERVICE_URL: {{ printf "http://%s:8084" (include "aegispay.componentName" (list . "payment-service")) | quote }}
+  ORCHESTRATOR_SERVICE_URL: {{ printf "http://%s:8085" (include "aegispay.componentName" (list . "payment-orchestrator")) | quote }}
+  FRAUD_SERVICE_URL: {{ printf "http://%s:8086" (include "aegispay.componentName" (list . "fraud-service")) | quote }}
+  AI_SERVICE_URL: {{ printf "http://%s:8087" (include "aegispay.componentName" (list . "ai-investigation-service")) | quote }}
+  NOTIFICATION_SERVICE_URL: {{ printf "http://%s:8088" (include "aegispay.componentName" (list . "notification-service")) | quote }}
+  ANALYTICS_SERVICE_URL: {{ printf "http://%s:8089" (include "aegispay.componentName" (list . "analytics-service")) | quote }}
+  ML_SERVICE_URL: {{ printf "http://%s:8000" (include "aegispay.componentName" (list . "ml-service")) | quote }}
+  ALLOW_UNASSESSED_PAYMENTS: {{ .Values.applicationConfig.allowUnassessedPayments | quote }}
+  FRAUD_HIGH_RISK_THRESHOLD: {{ .Values.applicationConfig.fraudHighRiskThreshold | quote }}
+  FRAUD_MEDIUM_RISK_THRESHOLD: {{ .Values.applicationConfig.fraudMediumRiskThreshold | quote }}
+  AI_PROVIDER: {{ .Values.applicationConfig.aiProvider | quote }}
+  AI_MODEL: {{ .Values.applicationConfig.aiModel | quote }}
+  AI_API_BASE_URL: {{ .Values.applicationConfig.aiApiBaseUrl | quote }}
+  DEMO_SEED_ENABLED: {{ .Values.applicationConfig.demoSeedEnabled | quote }}
+  MANAGEMENT_TRACING_SAMPLING_PROBABILITY: {{ .Values.global.tracingSamplingProbability | quote }}
+{{- if .Values.monitoring.enabled }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ printf "http://%s:4318" (include "aegispay.componentName" (list . "otel-collector")) | quote }}
+{{- else }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ required "monitoring.externalOtlpEndpoint is required when bundled monitoring is disabled" .Values.monitoring.externalOtlpEndpoint | quote }}
+{{- end }}

@@ -1,0 +1,51 @@
+# Keeps the Docker build context small and prevents secrets from ever being sent
+# to the daemon. The build context is the repository root (a Maven multi-module
+# build needs the parent POM and platform-common), so without this file every
+# target/ directory and node_modules tree would be uploaded on every build.
+
+# ---- Secrets: must never enter an image layer ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+secrets/
+
+# ---- Build output (the image rebuilds from source) ----
+**/target/
+**/build/
+**/dist/
+**/node_modules/
+
+# ---- Local tooling ----
+.tools/
+
+# ---- VCS and IDE ----
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+*.iml
+
+# ---- Python ----
+**/__pycache__/
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# ---- Docs and infra not needed by a JVM build ----
+docs/
+infrastructure/kubernetes/
+infrastructure/monitoring/
+*.md
+!README.md
+
+# ---- Runtime artefacts ----
+logs/
+*.log
+docker-volumes/

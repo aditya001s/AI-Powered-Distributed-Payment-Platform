@@ -1,0 +1,25 @@
+--- SUBJECT ---
+Your payment of {{amount}} {{currency}} did not go through
+
+--- EMAIL ---
+{{greeting?}}
+
+Your payment of {{amount}} {{currency}} could not be completed, so it has been
+cancelled.
+
+Reference: {{transactionId}}
+Note: {{description?}}
+
+Nothing has been taken from your balance. If any amount was held for this
+payment, it has been released and is available again.
+
+You can try again whenever you like. If it keeps failing, contact support and
+quote the reference above.
+
+- AegisPay
+
+--- SMS ---
+AegisPay: your payment of {{amount}} {{currency}} failed and was cancelled. Nothing was taken. Ref {{transactionId}}.
+
+--- IN_APP ---
+Your payment of {{amount}} {{currency}} failed and was cancelled. Nothing was taken from your balance. Reference {{transactionId}}.

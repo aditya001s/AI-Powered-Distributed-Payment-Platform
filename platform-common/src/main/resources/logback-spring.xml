@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared logging configuration for every AegisPay JVM service.
+
+  This file lives in platform-common, so it is on every service's classpath and
+  Spring Boot picks it up automatically. One definition means log shape cannot
+  drift between services, which matters because a log aggregator parses all nine
+  identically.
+
+  Two profiles:
+    LOG_JSON=true  (default in containers) -> single-line JSON, machine-parsable
+    LOG_JSON=false (local development)     -> coloured, human-readable console
+
+  Every line carries traceId, spanId and correlationId. traceId/spanId come from
+  Micrometer Tracing's MDC bridge; correlationId is set by CorrelationIdFilter and
+  restored by EventConsumerSupport across Kafka boundaries. Together they let a
+  single payment be reconstructed across nine services from log output alone.
+-->
+<configuration scan="false">
+
+    <springProperty scope="context" name="serviceName" source="spring.application.name"
+                    defaultValue="aegis-service"/>
+    <springProperty scope="context" name="jsonLogging" source="aegis.logging.json" defaultValue="true"/>
+    <springProperty scope="context" name="rootLevel" source="aegis.logging.level" defaultValue="INFO"/>
+
+    <!-- ============================================================ JSON ==== -->
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>correlationId</includeMdcKeyName>
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>spanId</includeMdcKeyName>
+            <includeMdcKeyName>userId</includeMdcKeyName>
+
+            <!-- Constant fields so the aggregator can filter by service/env
+                 without inferring them from the container name. -->
+            <customFields>{"service":"${serviceName}"}</customFields>
+
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <message>message</message>
+                <thread>thread</thread>
+                <logger>logger</logger>
+                <level>level</level>
+                <levelValue>[ignore]</levelValue>
+                <version>[ignore]</version>
+            </fieldNames>
+
+            <!-- Bound the stack trace. An unbounded trace in a JSON field can
+                 exceed the aggregator's line limit and silently drop the whole
+                 event, losing the error we most needed to see. -->
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerThrowable>40</maxDepthPerThrowable>
+                <maxLength>8192</maxLength>
+                <shortenedClassNameLength>40</shortenedClassNameLength>
+                <exclude>^sun\.reflect\..*\.invoke</exclude>
+                <exclude>^net\.sf\.cglib\.proxy\.MethodProxy\.invoke</exclude>
+                <exclude>^java\.util\.concurrent\.ThreadPoolExecutor</exclude>
+                <rootCauseFirst>true</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+    </appender>
+
+    <!-- ========================================================== CONSOLE === -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) %cyan(%-18.18logger{0}) [%X{correlationId:-no-correlation}] %msg%n%throwable{40}</pattern>
+        </encoder>
+    </appender>
+
+    <!-- =========================================================== LEVELS === -->
+    <!-- Framework noise pinned down so real signal is visible. -->
+    <logger name="org.apache.kafka" level="WARN"/>
+    <logger name="org.apache.kafka.clients.NetworkClient" level="ERROR"/>
+    <logger name="org.springframework.kafka" level="WARN"/>
+    <logger name="org.hibernate.SQL" level="WARN"/>
+    <logger name="org.hibernate.orm.jdbc.bind" level="WARN"/>
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+    <logger name="org.flywaydb" level="INFO"/>
+
+    <!--
+      Spring Security at DEBUG prints request details including headers. Pinned to
+      INFO so a misconfigured log level cannot leak bearer tokens into logs.
+    -->
+    <logger name="org.springframework.security" level="INFO"/>
+
+    <!-- Platform code: controlled by aegis.logging.level. -->
+    <logger name="com.aegispay" level="${rootLevel}"/>
+
+    <!--
+      Appender selection is driven by the Spring profile rather than by a Logback
+      <if> condition, because conditional processing requires Janino on the
+      classpath and adding a dependency just to branch here is not worth it.
+
+      Profile "local"  -> readable console (activate with SPRING_PROFILES_ACTIVE=local)
+      anything else    -> JSON, which is what containers and CI use
+    -->
+    <springProfile name="local">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!local">
+        <root level="INFO">
+            <appender-ref ref="JSON"/>
+        </root>
+    </springProfile>
+</configuration>

@@ -1,0 +1,183 @@
+###############################################################################
+# payment-orchestrator
+#
+# Saga coordinator and payment provider router. Drives the payment saga
+# (reserve funds, assess risk, charge a provider, post to the ledger,
+# capture) and compensates on failure. Routes across three simulated
+# providers on health, latency and failure rate, with a circuit breaker and
+# automatic fallback.
+#
+# Hosts and secrets come from the environment. Shared platform defaults are
+# imported from platform-common's aegis-defaults.yml, which this file overrides.
+###############################################################################
+
+spring:
+  application:
+    name: payment-orchestrator
+
+  config:
+    import: "classpath:aegis-defaults.yml"
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${ORCHESTRATOR_DB_NAME:aegis_orchestrator}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    locations: classpath:db/migration
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. validate turns a mapping/schema mismatch into a
+      # startup failure instead of a silent ALTER against a live database.
+      ddl-auto: validate
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys are fetched from the auth service. This service therefore
+          # holds no signing material and cannot mint a token, so compromising it
+          # does not yield the ability to forge identities.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:https://auth.aegispay.local}
+
+server:
+  port: ${SERVER_PORT:8085}
+
+# ------------------------------------------------------------------ platform ---
+aegis:
+  platform-env: ${PLATFORM_ENV:local}
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+
+  openapi:
+    description: >-
+      Drives the payment saga (reserve funds, assess risk, charge a provider, post to the ledger, capture) and compensates on failure. Routes across three simulated providers on health, latency and failure rate, with a circuit breaker and automatic fallback.
+
+  # Use the shared deny-by-default resource-server chain from platform-common.
+  security:
+    standard-chain:
+      enabled: true
+
+  # Credentials for outbound service-to-service calls (OAuth2 client credentials).
+  service-auth:
+    enabled: true
+    token-uri: ${AUTH_SERVICE_URL:http://localhost:8081}/api/auth/token
+    client-id: ${INTERNAL_CLIENT_ID:aegis-internal}
+    client-secret: ${INTERNAL_CLIENT_SECRET:}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # A distinct group per service: each one needs its own copy of every event.
+    # Sharing a group id would make services steal each other's partitions.
+    consumer-group-id: payment-orchestrator
+
+  outbox:
+    # This service emits domain events, so it records them to the outbox inside
+    # the business transaction and drains them to Kafka asynchronously.
+    enabled: true
+
+  # Downstream services the saga calls synchronously. Wallets because balance
+  # invariants belong to wallet-service; the ledger because the saga must know the
+  # posting committed BEFORE it captures - money should never move unrecorded, and
+  # waiting on an event this service publishes itself would deadlock.
+  clients:
+    wallet-service-url: ${WALLET_SERVICE_URL:http://localhost:8082}
+    ledger-service-url: ${LEDGER_SERVICE_URL:http://localhost:8083}
+    # Fraud, because the risk step gates the provider charge: the saga cannot
+    # continue without a verdict, and an event-driven request/reply would park it
+    # in a state the recovery sweep would then read as stalled.
+    fraud-service-url: ${FRAUD_SERVICE_URL:http://localhost:8086}
+
+  # ------------------------------------------------------------ orchestration ---
+  # Every value is tunable per environment: a failure threshold that is meaningful
+  # at a thousand payments a second is pure noise at two.
+  orchestration:
+    providers:
+      # Per attempt, not across the retry sequence, so a first attempt that hangs
+      # cannot consume the whole budget and leave no time to fall back.
+      call-timeout: ${PROVIDER_CALL_TIMEOUT:3s}
+      # Shorter than a real call: a probe that hangs must not delay the sweep.
+      probe-timeout: ${PROVIDER_PROBE_TIMEOUT:2s}
+      # Low deliberately. Retries multiply load on a dependency that is already
+      # struggling; breadth (another provider) beats depth. Applies only to faults
+      # known to have happened before the request reached the provider - a timeout
+      # is never retried on the same provider, because the charge may have landed.
+      max-attempts-per-provider: ${PROVIDER_MAX_ATTEMPTS:2}
+      retry-initial-interval: 150ms
+      retry-multiplier: 2.0
+      # Jitter, so simultaneous failures do not retry in lockstep and reproduce
+      # the overload they are recovering from.
+      retry-jitter-factor: 0.3
+      health-check-interval: ${PROVIDER_HEALTH_INTERVAL:30s}
+      health-check-initial-delay: 10s
+      # Above one on purpose: a single failed probe is far more likely to be a blip
+      # in the prober than an outage, and reacting would flap traffic on noise.
+      failures-before-unhealthy: 2
+      call-pool-size: ${PROVIDER_CALL_POOL_SIZE:8}
+
+    routing:
+      # Weights rather than a fixed priority order, because the trade-off changes
+      # with conditions: the cheapest rail is right while healthy and wrong the
+      # moment it is not. Reliability outranks price because a failed payment
+      # leaves a customer's money stuck mid-saga.
+      health-weight: 0.55
+      fee-weight: 0.25
+      latency-weight: 0.20
+      observation-window: 5m
+      max-providers-per-payment: 3
+      latency-ceiling: 2s
+
+    fraud:
+      # Wider than fraud-service's own model timeout, because fraud-service is
+      # expected to absorb a slow model and still answer: it runs its rules, gives
+      # up on ml-service, and returns a degraded verdict. A breach here therefore
+      # means fraud-service itself is unwell, not that the model is slow.
+      call-timeout: ${FRAUD_CALL_TIMEOUT:4s}
+      # Safe to retry: assessment is idempotent on the payment id, so a duplicate
+      # call returns the stored verdict rather than producing a second one.
+      max-attempts: ${FRAUD_MAX_ATTEMPTS:2}
+
+      # FALSE by default, and this is stricter than aegis.fraud.ml.reject-when-
+      # unavailable on purpose. When only the MODEL is down, fraud-service still
+      # runs its deterministic rules - a real, if reduced, assessment. When
+      # FRAUD-SERVICE is down there is no control at all, and continuing would
+      # record an unassessed payment as an approved one: a false statement in the
+      # audit trail of an automated decision. Failing is recoverable (nothing was
+      # charged, the reservation is released) and makes the outage visible as
+      # failed payments rather than invisible as unprotected ones.
+      allow-unassessed-payments: ${ALLOW_UNASSESSED_PAYMENTS:false}
+
+      # How long the wallet reservation is extended for when a payment is held for
+      # review. The saga's default 15 minutes is right for a payment that completes
+      # in seconds and badly wrong for one waiting on a human: the wallet's expiry
+      # sweeper would release the funds while this saga still believed they were
+      # held. Two days covers a weekend; longer would mean a forgotten alert sits
+      # on a customer's money instead of freeing it.
+      review-hold-ttl: ${FRAUD_REVIEW_HOLD_TTL:2d}
+
+    recovery:
+      enabled: ${SAGA_RECOVERY_ENABLED:true}
+      # Comfortably longer than the slowest legitimate saga. Too short and a
+      # payment waiting on a slow provider gets compensated out from under itself.
+      stalled-after: ${SAGA_STALLED_AFTER:2m}
+      sweep-interval: 60s
+      sweep-initial-delay: 45s
+      batch-size: 50
+
+# --------------------------------------------------------------- api docs ---
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+

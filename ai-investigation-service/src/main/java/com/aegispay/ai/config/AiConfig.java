@@ -1,0 +1,117 @@
+package com.aegispay.ai.config;
+
+import com.aegispay.ai.generation.HttpLlmReportGenerator;
+import com.aegispay.ai.generation.LocalReportComposer;
+import com.aegispay.ai.generation.ReportGenerator;
+import com.aegispay.ai.rag.Embedder;
+import com.aegispay.ai.rag.HashingEmbedder;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.retry.RetryRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+import org.springframework.web.client.RestClient;
+
+/**
+ * ai-investigation-service wiring.
+ *
+ * <p>Two decisions live here rather than in configuration, because both are about what the service is
+ * capable of rather than how it behaves.
+ */
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(AiProperties.class)
+public class AiConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(AiConfig.class);
+
+    /**
+     * The embedder.
+     *
+     * <p>One bean, injected everywhere, so the seeder and the retriever cannot disagree about which
+     * embedder is in use. Two independently-constructed embedders would be a subtle disaster: the corpus
+     * would be embedded by one and queried by the other, retrieval would return rows, and the rows would
+     * be meaningless.
+     */
+    @Bean
+    public Embedder embedder() {
+        Embedder embedder = new HashingEmbedder();
+        if (!embedder.isSemantic()) {
+            log.info("""
+                    Retrieval is using the offline lexical embedder {}. It matches shared vocabulary, \
+                    NOT paraphrase: a query about "an account unused for months" will not find a policy \
+                    about "dormant accounts" unless the words overlap. That is acceptable here because \
+                    queries are built from rule ids and feature names that the corpus is authored to \
+                    explain, and because the declared rule-to-policy mapping covers the strongest \
+                    associations exactly. Configure a hosted embedding model for genuinely semantic \
+                    retrieval.""", embedder.id());
+        }
+        return embedder;
+    }
+
+    /**
+     * The report generator.
+     *
+     * <p>Resolved once at startup rather than per request, so a misconfigured hosted provider is a startup
+     * log line instead of a failed generation on the first real investigation — which would look like a
+     * provider outage and send somebody debugging the wrong thing.
+     *
+     * <p>Falls back to the offline composer when a hosted provider is selected but not usable. Deliberately
+     * a warning rather than a startup failure: a service that refused to start because an API key was
+     * missing would take the whole investigation pipeline down over a degraded-but-working configuration,
+     * and an investigation is advisory.
+     */
+    @Bean
+    @Primary
+    public ReportGenerator reportGenerator(AiProperties properties,
+                                           RestClient.Builder restClientBuilder,
+                                           CircuitBreakerRegistry circuitBreakers,
+                                           RetryRegistry retries,
+                                           MeterRegistry meterRegistry) {
+
+        String configured = properties.getGeneration().getProvider();
+        if (configured == null || configured.isBlank() || "local".equalsIgnoreCase(configured)) {
+            log.info("""
+                    Investigation narratives will be written by the offline deterministic composer. It \
+                    assembles a report from the evidence and the retrieved policy and cannot \
+                    hallucinate, because it has no source of facts beyond its inputs. Every report it \
+                    writes is flagged deterministicFallback so analysts know what they are reading.""");
+            return new LocalReportComposer();
+        }
+
+        HttpLlmReportGenerator hosted = new HttpLlmReportGenerator(
+                restClientBuilder, properties, circuitBreakers, retries, meterRegistry);
+
+        if (!hosted.isAvailable()) {
+            log.warn("""
+                    Provider '{}' is configured but has no usable API key, so investigations will be \
+                    written by the offline composer instead. Set AI_API_KEY to use the hosted model. \
+                    Not a startup failure: an investigation is advisory, and refusing to start would \
+                    take the whole pipeline down over a configuration that still works.""", configured);
+            return new LocalReportComposer();
+        }
+
+        log.warn("""
+                Investigation narratives will be generated by {}. Payment data LEAVES THE PLATFORM: the \
+                prompt carries the payment id, amount, feature values, device and location facts, and \
+                customer-supplied text. It carries no customer name, email, phone number or wallet id. \
+                Confirm this is intended for this environment.""", hosted.id());
+        return hosted;
+    }
+
+    /**
+     * The fallback generator, always available.
+     *
+     * <p>A separate bean from {@link #reportGenerator} even when they are the same implementation, because
+     * the scoring service needs to be able to reach the composer specifically when a hosted generation
+     * fails. Resolving the fallback by re-reading configuration at failure time would mean a
+     * misconfiguration could leave the fallback path broken too — exactly when it is needed.
+     */
+    @Bean
+    public LocalReportComposer localReportComposer() {
+        return new LocalReportComposer();
+    }
+}

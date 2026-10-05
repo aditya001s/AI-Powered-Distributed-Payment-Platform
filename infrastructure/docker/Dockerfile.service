@@ -1,0 +1,148 @@
+# =============================================================================
+# Shared multi-stage Dockerfile for every AegisPay JVM service.
+#
+# One file, parameterised by the MODULE build argument, rather than ten
+# near-identical Dockerfiles. Ten copies would drift: a JVM flag or a security
+# hardening step added to one and forgotten in the others is exactly the class of
+# inconsistency that is impossible to spot in review.
+#
+#   docker build -f infrastructure/docker/Dockerfile.service \
+#                --build-arg MODULE=payment-service -t aegispay/payment-service .
+#
+# Build context is the repository ROOT, because a Maven multi-module build needs
+# the parent POM and the platform-common module, not just one service directory.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: build
+#
+# Uses the Maven Wrapper rather than a maven:* base image, so the build uses the
+# exact Maven version pinned in .mvn/wrapper/maven-wrapper.properties. A
+# maven:3.9 tag silently drifts to a new patch release and can change build
+# behaviour between two builds of the same commit.
+# -----------------------------------------------------------------------------
+FROM eclipse-temurin:25-jdk AS build
+
+ARG MODULE
+# Optional build-stage cap. The local Compose profile supplies a conservative
+# value so concurrent Maven/JDK processes cannot exhaust an 8-GB workstation.
+# It does not enter the runtime image and the normal Compose build leaves it empty.
+ARG MAVEN_OPTS=""
+ENV MAVEN_OPTS="${MAVEN_OPTS}"
+WORKDIR /build
+
+# ---- Dependency layer ----
+# POMs are copied on their own first. Docker caches this layer, so editing Java
+# source does not re-download the entire dependency tree; only a POM change does.
+# That turns a ~3 minute rebuild into ~20 seconds.
+COPY mvnw ./
+COPY .mvn/ .mvn/
+COPY pom.xml ./
+COPY platform-common/pom.xml           platform-common/
+COPY api-gateway/pom.xml               api-gateway/
+COPY auth-service/pom.xml              auth-service/
+COPY wallet-service/pom.xml            wallet-service/
+COPY ledger-service/pom.xml            ledger-service/
+COPY payment-service/pom.xml           payment-service/
+COPY payment-orchestrator/pom.xml      payment-orchestrator/
+COPY fraud-service/pom.xml             fraud-service/
+COPY ai-investigation-service/pom.xml  ai-investigation-service/
+COPY notification-service/pom.xml      notification-service/
+COPY analytics-service/pom.xml         analytics-service/
+
+RUN chmod +x mvnw
+
+# -am also resolves platform-common, which every service depends on.
+# Failure is tolerated: go-offline cannot always resolve every plugin, and the
+# package step below will fetch whatever is missing. Treating it as fatal makes
+# the build brittle for no benefit.
+RUN --mount=type=cache,target=/root/.m2/repository \
+    ./mvnw -B -q -pl "${MODULE}" -am dependency:go-offline -DskipTests || true
+
+# ---- Source layer ----
+COPY platform-common/src           platform-common/src
+COPY ${MODULE}/src                 ${MODULE}/src
+
+# Tests are NOT executed here. `-DskipTests` still compiles test sources because
+# platform-common publishes shared integration helpers as an attached test JAR;
+# `maven.test.skip=true` would suppress that artifact and break reactor resolution.
+RUN --mount=type=cache,target=/root/.m2/repository \
+    ./mvnw -B -pl "${MODULE}" -am package -DskipTests
+
+# Normalise the artefact name so the runtime stage does not need to know the
+# module name or version.
+RUN cp "${MODULE}/target/${MODULE}-1.0.0.jar" /build/application.jar
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime
+#
+# JRE, not JDK: drops the compiler and dev tooling, which is both a smaller image
+# and a smaller attack surface.
+# -----------------------------------------------------------------------------
+FROM eclipse-temurin:25-jre AS runtime
+
+ARG MODULE
+ARG SERVICE_PORT=8080
+
+LABEL org.opencontainers.image.title="AegisPay ${MODULE}" \
+      org.opencontainers.image.description="AI-Powered Payment Orchestration & Fraud Intelligence Platform" \
+      org.opencontainers.image.vendor="AegisPay" \
+      org.opencontainers.image.licenses="MIT"
+
+# curl is needed by the compose healthcheck. Installed explicitly and the apt
+# lists removed in the same layer, so the cache does not persist in the image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# ---- Run as a non-root user ----
+# A container process running as root that is compromised has root in the
+# container, which materially widens the path to a host escape. UID is fixed so
+# file ownership is predictable across rebuilds and on mounted volumes.
+RUN groupadd --system --gid 10001 aegis \
+ && useradd  --system --uid 10001 --gid aegis --home /app --shell /usr/sbin/nologin aegis
+
+WORKDIR /app
+COPY --from=build --chown=aegis:aegis /build/application.jar /app/application.jar
+
+USER aegis:aegis
+
+EXPOSE ${SERVICE_PORT}
+
+# ---- JVM configuration ----
+#   MaxRAMPercentage           the JVM must size its heap from the CONTAINER limit,
+#                              not the host's total RAM. Without this a 512Mi pod
+#                              sees the host's memory, sizes a large heap, and is
+#                              OOM-killed by the kernel with no Java stack trace.
+#   ExitOnOutOfMemoryError     die fast so the orchestrator restarts a pod that is
+#                              wedged, instead of leaving it thrashing GC forever.
+#   HeapDumpOnOutOfMemoryError capture evidence before exiting.
+#   UseG1GC                    predictable pause times; better for request/response
+#                              latency than a throughput-first collector.
+#   /dev/urandom               avoids a startup stall on hosts with a shallow
+#                              entropy pool, which matters because this platform
+#                              generates cryptographic tokens at startup.
+ENV JAVA_TOOL_OPTIONS="\
+-XX:MaxRAMPercentage=75.0 \
+-XX:InitialRAMPercentage=50.0 \
+-XX:+ExitOnOutOfMemoryError \
+-XX:+HeapDumpOnOutOfMemoryError \
+-XX:HeapDumpPath=/tmp \
+-XX:+UseG1GC \
+-XX:MaxGCPauseMillis=200 \
+-Djava.security.egd=file:/dev/./urandom \
+-Dfile.encoding=UTF-8 \
+-Duser.timezone=UTC"
+
+ENV SERVER_PORT=${SERVICE_PORT}
+
+# Liveness only. Readiness (which includes database and Redis) is checked by the
+# orchestrator; a liveness probe that depended on Redis would restart every pod
+# during a Redis outage instead of degrading gracefully.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=90s --retries=5 \
+    CMD curl -fsS "http://127.0.0.1:${SERVER_PORT}/actuator/health/liveness" || exit 1
+
+# exec form: the JVM becomes PID 1 and receives SIGTERM directly, which lets
+# Spring Boot's graceful shutdown drain in-flight requests. The shell form would
+# make /bin/sh PID 1 and swallow the signal, so every deploy would drop requests.
+ENTRYPOINT ["java", "-jar", "/app/application.jar"]

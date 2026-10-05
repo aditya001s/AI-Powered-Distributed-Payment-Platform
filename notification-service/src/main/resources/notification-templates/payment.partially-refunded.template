@@ -1,0 +1,23 @@
+--- SUBJECT ---
+You have been partly refunded for your {{amount}} {{currency}} payment
+
+--- EMAIL ---
+{{greeting?}}
+
+Part of your payment of {{amount}} {{currency}} has been refunded. The refunded
+amount is back in your balance.
+
+Reference: {{transactionId}}
+Note: {{description?}}
+
+This payment has been refunded more than once or refunded in part, so the amount
+returned is less than the amount above. Your balance and transaction history
+show exactly what was returned and when.
+
+- AegisPay
+
+--- SMS ---
+AegisPay: part of your {{amount}} {{currency}} payment was refunded. See your transaction history for the amount. Ref {{transactionId}}.
+
+--- IN_APP ---
+Part of your payment of {{amount}} {{currency}} was refunded. Your transaction history shows exactly what was returned. Reference {{transactionId}}.
