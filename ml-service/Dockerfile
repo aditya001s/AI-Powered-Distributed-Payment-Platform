@@ -27,7 +27,7 @@
 # The training seed is fixed (ML_RANDOM_SEED), so rebuilding this image from the
 # same commit produces the same model and the same recorded model version.
 # -----------------------------------------------------------------------------
-FROM python:3.12-slim AS build
+FROM python:3.15-slim AS build
 
 WORKDIR /build
 
@@ -65,7 +65,7 @@ RUN python -m app.train
 # stage, because scikit-learn ships compiled extensions and copying an
 # environment between images is how a subtly broken one gets shipped.
 # -----------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 LABEL org.opencontainers.image.title="AegisPay ml-service" \
       org.opencontainers.image.description="Calibrated fraud probability, 0-100 risk score and per-feature explanation. Model trained on SYNTHETIC data." \
